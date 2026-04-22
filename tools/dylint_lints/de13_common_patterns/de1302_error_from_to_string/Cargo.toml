@@ -20,10 +20,6 @@ name = "bad_ufcs_to_string"
 path = "ui/bad_ufcs_to_string.rs"
 
 [[example]]
-name = "bad_generic_error_bound"
-path = "ui/bad_generic_error_bound.rs"
-
-[[example]]
 name = "bad_closure_to_string"
 path = "ui/bad_closure_to_string.rs"
 
@@ -32,8 +28,20 @@ name = "bad_tryfrom_to_string"
 path = "ui/bad_tryfrom_to_string.rs"
 
 [[example]]
+name = "bad_tryfrom_assoc_error"
+path = "ui/bad_tryfrom_assoc_error.rs"
+
+[[example]]
 name = "good_from_preserve"
 path = "ui/good_from_preserve.rs"
+
+[[example]]
+name = "good_unrelated_error"
+path = "ui/good_unrelated_error.rs"
+
+[[example]]
+name = "good_macro_expansion"
+path = "ui/good_macro_expansion.rs"
 
 [dependencies]
 clippy_utils.workspace = true

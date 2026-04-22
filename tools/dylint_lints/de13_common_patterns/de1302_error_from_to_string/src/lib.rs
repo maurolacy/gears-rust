@@ -1,5 +1,5 @@
 // Created: 2026-03-13 by Constructor Tech
-// Updated: 2026-04-21 by Constructor Tech
+// Updated: 2026-04-22 by Constructor Tech
 #![feature(rustc_private)]
 #![warn(unused_extern_crates)]
 
@@ -34,8 +34,12 @@ dylint_linting::declare_late_lint! {
     /// preserve the chain without any extra effort.
     ///
     /// Unlike the early-pass version, this lint gates on whether the source or target
-    /// type actually implements `std::error::Error`, eliminating false positives from
-    /// name-based heuristics.
+    /// type actually implements `std::error::Error` (and, for `TryFrom`, also the
+    /// associated `Error` type), eliminating false positives from name-based
+    /// heuristics. Inside the matched body, `.to_string()` is only flagged when the
+    /// receiver type is the source parameter type itself (or the `TryFrom::Error`
+    /// assoc type) — `.to_string()` on unrelated error values used for logging is
+    /// left alone. Macro-expanded `.to_string()` calls are also ignored.
     ///
     /// ### Example
     ///
@@ -76,10 +80,19 @@ fn implements_error<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
 
 struct ToStringVisitor<'tcx, 'cx> {
     cx: &'cx LateContext<'tcx>,
-    /// Typeck results for the `fn from` body being walked.
-    /// Used to check the receiver type of `.to_string()` calls so we only flag
-    /// calls on Error-implementing types, not on `&str` or other non-error values.
+    /// Typeck results for the body currently being walked. Swapped when we
+    /// descend into a closure, which has its own typeck tables.
     typeck: &'tcx TypeckResults<'tcx>,
+    /// The source parameter type of the `From` / `TryFrom` impl (`X` in
+    /// `impl From<X> for Y`). We only flag `.to_string()` when the receiver
+    /// type equals this, which eliminates false positives from stringifying
+    /// unrelated error values for logging etc.
+    source_ty: Ty<'tcx>,
+    /// For `TryFrom` impls, the `type Error = ...` associated type if it
+    /// implements `std::error::Error`. Also a valid receiver match — this
+    /// catches patterns like stringifying a locally constructed error of the
+    /// associated type while building the `Err(..)` branch.
+    error_assoc_ty: Option<Ty<'tcx>>,
 }
 
 impl<'tcx> ToStringVisitor<'tcx, '_> {
@@ -98,31 +111,39 @@ impl<'tcx> ToStringVisitor<'tcx, '_> {
         });
     }
 
-    /// Returns true if `ty` — after stripping a single reference layer — implements `Error`.
-    /// UFCS `ToString::to_string(&err)` passes `&err`, so unwrap one ref before the trait check.
-    fn error_receiver(&self, ty: Ty<'tcx>) -> bool {
+    /// Returns true if `ty` (after peeling references) is the source parameter
+    /// type of the impl, or the `TryFrom::Error` associated type. This is the
+    /// tightened receiver check: only the specific types whose chain would be
+    /// destroyed by stringification inside this impl are flagged.
+    fn is_relevant_receiver(&self, ty: Ty<'tcx>) -> bool {
         let inner = ty.peel_refs();
-        implements_error(self.cx, inner)
+        inner == self.source_ty || self.error_assoc_ty.is_some_and(|e| inner == e)
     }
 }
 
 impl<'tcx> hir::intravisit::Visitor<'tcx> for ToStringVisitor<'tcx, '_> {
     fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+        // Skip any expression that came from a macro expansion (derive macros,
+        // format/tracing macros, `?` desugaring, future format-args lowering).
+        // We still descend into children in case the macro wraps user-written
+        // subexpressions whose spans are attributed to the caller.
+        let in_macro = expr.span.from_expansion();
+
         match expr.kind {
-            // Method call form: `e.to_string()`
-            ExprKind::MethodCall(seg, recv, args, _) => {
+            // Method call form: `e.to_string()`.
+            ExprKind::MethodCall(seg, recv, args, _) if !in_macro => {
                 if seg.ident.name.as_str() == "to_string" && args.is_empty() {
                     let recv_ty = self.typeck.expr_ty(recv);
-                    if implements_error(self.cx, recv_ty) {
+                    if self.is_relevant_receiver(recv_ty) {
                         self.emit(expr.span);
                     }
                 }
             }
             // UFCS form: `ToString::to_string(&e)` or `<E as ToString>::to_string(&e)`.
-            ExprKind::Call(callee, [arg]) => {
+            ExprKind::Call(callee, [arg]) if !in_macro => {
                 if is_to_string_path(self.cx, callee) {
                     let arg_ty = self.typeck.expr_ty(arg);
-                    if self.error_receiver(arg_ty) {
+                    if self.is_relevant_receiver(arg_ty) {
                         self.emit(expr.span);
                     }
                 }
@@ -198,10 +219,39 @@ impl<'tcx> LateLintPass<'tcx> for De1302ErrorFromToString {
         let source_ty = impl_trait_ref.args.type_at(1); // X
         let target_ty = impl_trait_ref.args.type_at(0); // Y = Self
 
-        // Gate: at least one of source or target must actually implement std::error::Error.
-        // This replaces name heuristics, eliminating false positives like
+        // For `TryFrom`, extract `type Error = ...` — used both to extend the
+        // impl-level gate (so bodies that only touch Error via the assoc type
+        // still get checked) and to widen the tightened receiver check.
+        let error_assoc_ty: Option<Ty<'tcx>> = if conversion_method == "try_from" {
+            impl_block.items.iter().find_map(|item_ref| {
+                let node = cx.tcx.hir_node_by_def_id(item_ref.owner_id.def_id);
+                let hir::Node::ImplItem(impl_item) = node else {
+                    return None;
+                };
+                if impl_item.ident.name.as_str() != "Error" {
+                    return None;
+                }
+                if !matches!(impl_item.kind, ImplItemKind::Type(..)) {
+                    return None;
+                }
+                let ty = cx
+                    .tcx
+                    .type_of(item_ref.owner_id.def_id)
+                    .instantiate_identity();
+                implements_error(cx, ty).then_some(ty)
+            })
+        } else {
+            None
+        };
+
+        // Gate: at least one of source, target, or (for TryFrom) the Error
+        // associated type must actually implement std::error::Error. This
+        // replaces name heuristics, eliminating false positives like
         // `impl From<String> for ParseError` where String is not an Error.
-        if !implements_error(cx, source_ty) && !implements_error(cx, target_ty) {
+        if !implements_error(cx, source_ty)
+            && !implements_error(cx, target_ty)
+            && error_assoc_ty.is_none()
+        {
             return;
         }
 
@@ -220,7 +270,12 @@ impl<'tcx> LateLintPass<'tcx> for De1302ErrorFromToString {
             };
             let body = cx.tcx.hir_body(body_id);
             let typeck = cx.tcx.typeck(item_ref.owner_id.def_id);
-            let mut visitor = ToStringVisitor { cx, typeck };
+            let mut visitor = ToStringVisitor {
+                cx,
+                typeck,
+                source_ty,
+                error_assoc_ty,
+            };
             hir::intravisit::walk_expr(&mut visitor, body.value);
         }
     }
