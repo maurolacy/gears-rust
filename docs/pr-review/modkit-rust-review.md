@@ -113,12 +113,12 @@ For any PR that writes to multiple resources, check that every failure arm is co
 
 ---
 
-## ARCH-005: Logic Duplication Across Passes
+## ARCH-005: Duplicated Decision Logic
 **Severity**: MEDIUM
 
-When a PR introduces both an analysis pass and an execution pass over the same data, the execution pass often re-implements detection or classification logic already present in the analysis pass. Two implementations of the same algorithm diverge silently — a bug fixed in one is not fixed in the other, and neither the compiler nor the tests will catch the drift.
+When the same decision — a classification, a validity check, a graph traversal, a rule evaluation — is implemented independently in two or more components, the implementations diverge silently over time. A bug fixed in one copy is not fixed in the other, and the compiler provides no signal that the two are supposed to agree.
 
-If the PR has a component that analyzes or classifies data and a separate component that acts on it, check whether the acting component consumes the analysis output or re-derives it independently. Re-deriving is the smell: the executor re-walks the same structure or recomputes the same sets the analyzer already resolved.
+Look for cases where a component re-derives something another component in the same PR already computed: re-walking a structure, re-checking conditions, re-classifying entities. The same smell appears at the module boundary level — two modules each encoding the same business rule independently — or at the function level, with near-identical logic blocks in different files. The fix is always to make one consumer of the shared logic rather than two producers.
 
 ---
 

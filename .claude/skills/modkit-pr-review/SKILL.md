@@ -65,12 +65,6 @@ When reviewing, also consult:
 
 ## Steps
 
-### Step 0: PR-level architecture analysis
-
-Before reading any individual file, assess the PR as a whole. Read the PR title, body, and the complete list of changed files. Skim the diff structure (module paths, what is new vs modified) without reading implementation details yet.
-
-Apply every item in the `# ARCHITECTURE REVIEW` section of `docs/pr-review/modkit-rust-review.md` (ARCH-001 through ARCH-007). Architecture findings are posted as PR-level issue comments rather than inline, since they describe structural problems not anchored to a single line. ARCH-007 is noted in the terminal summary only — do not post it as a comment.
-
 ### Step 1: Fetch PR metadata and diff
 
 ```bash
@@ -80,23 +74,39 @@ gh pr diff <PR_NUMBER> --repo $REPO
 
 Save the diff output for analysis. Extract the HEAD commit SHA — you need it for posting comments.
 
-### Step 2: Identify Rust files in diff
+### Step 2: PR-level architecture analysis
+
+With the PR title, body, and diff in hand, assess the PR as a whole before doing a full per-file review. Apply every item in the `# ARCHITECTURE REVIEW` section of `docs/pr-review/modkit-rust-review.md` (ARCH-001 through ARCH-007).
+
+Some items (ARCH-001, ARCH-007) can be answered from the file list and PR description alone. Others (ARCH-002, ARCH-003, ARCH-004, ARCH-006) require reading relevant code sections and comments — do that now rather than deferring to the per-file pass. The goal is to identify structural problems before getting drawn into line-level details.
+
+Record architecture findings. Post them as PR-level issue comments (not inline review comments) using `gh api`:
+
+```bash
+gh api repos/$REPO/issues/<PR_NUMBER>/comments \
+  --method POST \
+  -f body="**[ARCH-002] HIGH**\n\n<issue description>\n\n<fix>"
+```
+
+Format each PR-level comment as: `**[<ID>] <SEVERITY>**` on the first line, then a blank line, then the issue, then the fix — matching the inline comment style. ARCH-007 is noted in the terminal summary only — do not post it as a comment.
+
+### Step 3: Identify Rust files in diff
 
 Parse the diff to find all `.rs` files that were added or modified.
 For each file, note the changed line ranges (added lines only — you can only comment on lines present in the diff).
 
-### Step 3: Read review guidelines and classify files
+### Step 4: Read review guidelines and classify files
 
 Read `docs/pr-review/modkit-rust-review.md` (always needed).
 
-For each `.rs` file from Step 2, determine whether it is ModKit-owned code:
+For each `.rs` file from Step 3, determine whether it is ModKit-owned code:
 - Check the nearest `Cargo.toml` for modkit dependencies/features or a `modkit-` crate name.
 - Check whether the file path matches ModKit module conventions (`modules/*/src/`, `crates/modkit-*/`).
 - Scan the file for ModKit imports (`use modkit_*`) or ModKit types (`OperationBuilder`, `SecureConn`, `SecureORM`, `ClientHub`, `ModuleLifecycle`).
 
 If **any** file is classified as ModKit-owned, also read `docs/pr-review/modkit-framework-compliance-review.md`.
 
-### Step 4: Review each changed file
+### Step 5: Review each changed file
 
 For each `.rs` file in the diff:
 
@@ -106,7 +116,7 @@ c. Apply **modkit-tests-quality-review.md** checklist items - to every changed R
 d. **Only if the file was classified as ModKit-owned in Step 3**, also apply **modkit-framework-compliance-review.md** checklist items — SDK pattern, OperationBuilder, SecureConn, module layout, error types, etc.
 e. Record each finding with: checklist ID, severity, file path, line number, issue description, fix.
 
-### Step 5: Filter and deduplicate
+### Step 6: Filter and deduplicate
 
 - Drop findings that are not evidenced in the diff
 - Drop style issues that rustfmt/clippy should catch
@@ -114,7 +124,7 @@ e. Record each finding with: checklist ID, severity, file path, line number, iss
 - Merge overlapping findings on the same line
 - Keep only findings where you have concrete evidence
 
-### Step 6: Post inline review comments on GitHub
+### Step 7: Post inline review comments on GitHub
 
 Use `gh api` to create a pull request review with inline comments.
 
@@ -146,7 +156,7 @@ gh api repos/$REPO/pulls/<PR_NUMBER>/reviews \
   --input /tmp/review-payload.json
 ```
 
-### Step 7: Print summary
+### Step 8: Print summary
 
 After posting, print a compact summary table to the terminal. Architecture findings appear first, followed by code-level findings.
 
