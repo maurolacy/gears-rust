@@ -122,22 +122,32 @@ fn validate_membership_type_code_rejects_empty() {
 }
 
 #[test]
-fn validate_membership_type_code_rejects_too_long() {
-    let long_code = format!("gts.cf.core.idp.user.v1~{}", "a".repeat(1100));
-    assert!(long_code.len() > 1024);
-    let result = validation::validate_membership_type_code(&long_code);
+fn validate_membership_type_code_accepts_trailing_wildcard_after_tilde() {
+    // Wildcard form per ADR-001 `x-gts-ref` convention.
+    let result = validation::validate_membership_type_code("gts.cf.core.rg.type.v1~*");
+    assert!(result.is_ok(), "Expected ok, got {result:?}");
+}
+
+#[test]
+fn validate_membership_type_code_accepts_trailing_wildcard_after_dot() {
+    // `gts.cf.core.am.*` -- pattern matching any AM-vendored type.
+    let result = validation::validate_membership_type_code("gts.cf.*");
+    assert!(result.is_ok(), "Expected ok, got {result:?}");
+}
+
+#[test]
+fn validate_membership_type_code_rejects_malformed_gts_path() {
+    let result = validation::validate_membership_type_code("not-a-gts-path");
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), DomainError::Validation { .. }));
 }
 
 #[test]
-fn validate_membership_type_code_accepts_arbitrary_string_within_limits() {
-    // Membership validation is intentionally lenient — it mirrors the
-    // pre-existing leniency of `validate_type_code` (no strict GTS-syntax
-    // check), only the RG-prefix requirement is dropped. Deeper format
-    // checking is deferred to the DB-side `resolve_ids` call.
-    let result = validation::validate_membership_type_code("anything-non-empty");
-    assert!(result.is_ok(), "Expected ok, got {result:?}");
+fn validate_membership_type_code_rejects_mid_string_wildcard() {
+    // GtsWildcard allows `*` only at the very end of the pattern.
+    let result = validation::validate_membership_type_code("gts.cf.*.user.v1~");
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), DomainError::Validation { .. }));
 }
 
 // ── validate_metadata_schema ────────────────────────────────────────────

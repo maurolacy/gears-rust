@@ -46,37 +46,34 @@ pub fn validate_type_code(code: &str) -> Result<(), DomainError> {
 
 /// Validate a GTS type code used as a membership resource type.
 ///
-/// Same length and emptiness rules as [`validate_type_code`], but does
-/// NOT require the `gts.cf.core.rg.type.v1~` prefix. Per `DESIGN.md`
-/// ("RG type prefix requirement"), `allowed_memberships` entries are
-/// external domain types (e.g. `gts.cf.core.idp.user.v1~`,
-/// `gts.cf.vendor.lms.course.v1~`) and need not live in the RG
-/// type-registry namespace.
+/// Unlike [`validate_type_code`], this does NOT require the
+/// `gts.cf.core.rg.type.v1~` prefix. Per `DESIGN.md` ("RG type prefix
+/// requirement"), `allowed_memberships` entries are external domain
+/// types (e.g. `gts.cf.core.idp.user.v1~`, `gts.cf.vendor.lms.course.v1~`)
+/// and need not live in the RG type-registry namespace.
 ///
-/// Deeper GTS-syntax validation is intentionally not enforced here —
-/// it stays consistent with the pre-existing leniency of
-/// [`validate_type_code`], which also only checks emptiness and length.
-/// The DB-level `resolve_ids` call (called after validation) still
-/// ensures the code corresponds to a registered type.
+/// Format validation is delegated to [`gts::GtsWildcard::new`], the
+/// canonical GTS parser. This accepts both exact GTS IDs
+/// (`gts.cf.core.idp.user.v1~`) and trailing-wildcard patterns
+/// (`gts.cf.core.am.*`, `gts.cf.core.rg.type.v1~*`) — matching the
+/// `x-gts-ref` convention from ADR-001 (e.g. `"x-gts-ref": "gts.*"`).
+///
+/// **Note on wildcard storage**: wildcard codes pass *validation* here
+/// but `gts_type_allowed_membership` is a junction table with
+/// `SMALLINT FK → gts_type.id`, so the downstream `resolve_ids` call
+/// will still fail for wildcards that do not correspond to a registered
+/// concrete type. Pattern-based membership matching requires a separate
+/// schema change (e.g. a nullable pattern column on the junction row)
+/// and is out of scope for this validation pass.
 ///
 /// # Errors
 ///
-/// Returns [`DomainError::validation`] if the code is empty or exceeds
-/// the 1024-character limit.
+/// Returns [`DomainError::validation`] if the code is not a valid GTS
+/// ID or trailing-wildcard pattern.
 pub fn validate_membership_type_code(code: &str) -> Result<(), DomainError> {
-    let code = code.trim().to_lowercase();
-    let code = code.as_str();
-    if code.is_empty() {
-        return Err(DomainError::validation(
-            "Membership type code must not be empty",
-        ));
-    }
-    if code.chars().count() > 1024 {
-        return Err(DomainError::validation(
-            "Membership type code must not exceed 1024 characters",
-        ));
-    }
-    Ok(())
+    gts::GtsWildcard::new(code).map(|_| ()).map_err(|e| {
+        DomainError::validation(format!("Invalid membership type code '{code}': {e}"))
+    })
 }
 
 /// Validate that a `metadata_schema` value is a valid JSON Schema.
