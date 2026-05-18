@@ -1,4 +1,4 @@
-# md-map.py
+# md-fabric.py
 from __future__ import annotations
 
 import argparse
@@ -183,7 +183,7 @@ def resolve_config_path(repo_root: Path, script_dir: Path, explicit: Path | None
     if explicit is not None:
         return explicit if explicit.exists() else None
 
-    candidates = [repo_root / ".md-map.toml", script_dir / "md-map.toml"]
+    candidates = [repo_root / ".md-fabric.toml", script_dir / "md-fabric.toml"]
     for candidate in candidates:
         if candidate.exists():
             return candidate
@@ -525,38 +525,162 @@ def extract_references(files: list[MarkdownFile]) -> list[dict[str, Any]]:
     return edges
 
 
+def cpt_paragraph(content: str, match_start: int) -> str:
+    """Return the paragraph block or table row that contains the CPT reference."""
+    lines = content.splitlines()
+    # Locate which line index contains match_start
+    pos = 0
+    line_idx = 0
+    for i, line in enumerate(lines):
+        end = pos + len(line)
+        if pos <= match_start <= end:
+            line_idx = i
+            break
+        pos = end + 1  # +1 for the stripped newline
+
+    stripped = lines[line_idx].strip()
+
+    # ── Table row ─────────────────────────────────────────────────────────
+    if stripped.startswith('|'):
+        # Walk back to the first row of this table block
+        start = line_idx
+        while start > 0 and lines[start - 1].strip().startswith('|'):
+            start -= 1
+        parts: list[str] = []
+        if start < line_idx:
+            # Include header row
+            parts.append(lines[start].strip())
+            # Include separator row if present
+            if (start + 1 < line_idx
+                    and re.match(r'^\|[\s\-:|]+\|', lines[start + 1].strip())):
+                parts.append(lines[start + 1].strip())
+            if line_idx > start + 2:
+                parts.append('\u2026')  # ellipsis when rows were skipped
+            parts.append(stripped)
+        else:
+            parts = [stripped]  # match IS the first row
+        return '\n'.join(parts)
+
+    # ── Regular paragraph ──────────────────────────────────────────────────
+    # Find the nearest heading above the matched line
+    heading = ''
+    for i in range(line_idx - 1, -1, -1):
+        if lines[i].startswith('#'):
+            heading = lines[i].strip()
+            break
+
+    # Walk back to find the paragraph start (blank line or heading boundary)
+    p_start = line_idx
+    while p_start > 0:
+        prev = lines[p_start - 1].strip()
+        if not prev or prev.startswith('#'):
+            break
+        p_start -= 1
+
+    # Walk forward to find the paragraph end
+    p_end = line_idx
+    while p_end < len(lines) - 1:
+        nxt = lines[p_end + 1].strip()
+        if not nxt or nxt.startswith('#'):
+            break
+        p_end += 1
+
+    para = '\n'.join(line.rstrip() for line in lines[p_start:p_end + 1])
+    return (heading + '\n\n' + para) if heading else para
+
+
+def cpt_def_snippet(content: str, char_pos: int) -> str:
+    """Return the full section containing the definition (nearest heading → next heading or EOF)."""
+    lines = content.splitlines()
+    pos = 0
+    line_idx = 0
+    for i, ln in enumerate(lines):
+        end = pos + len(ln)
+        if pos <= char_pos <= end:
+            line_idx = i
+            break
+        pos = end + 1
+
+    # Walk back to find the nearest heading line
+    heading_idx = -1
+    for i in range(line_idx - 1, -1, -1):
+        if lines[i].startswith('#'):
+            heading_idx = i
+            break
+
+    # Walk forward from the definition line to find the next heading (section boundary)
+    section_end = len(lines) - 1
+    for i in range(line_idx + 1, len(lines)):
+        if lines[i].startswith('#'):
+            section_end = i - 1
+            break
+
+    start = heading_idx if heading_idx >= 0 else 0
+    section = lines[start:section_end + 1]
+
+    # Trim trailing blank lines
+    while section and not section[-1].strip():
+        section.pop()
+
+    return '\n'.join(line.rstrip() for line in section)
+
+
 def extract_cpt_references(files: list[MarkdownFile]) -> list[dict[str, Any]]:
     cpt_def = re.compile(r'\*\*ID\*\*:\s*`(cpt-[a-z0-9][a-z0-9_-]*)`')
     cpt_ref = re.compile(r'`(cpt-[a-z0-9][a-z0-9_-]*)`')
-
-    cpt_def_map: dict[str, str] = {}
+    cpt_def_map: dict[str, tuple[str, int]] = {}
+    file_content_map: dict[str, str] = {f.rel: f.content for f in files}
     for file in files:
-        for m in cpt_def.finditer(file.content):
-            cpt_id = m.group(1)
-            if cpt_id not in cpt_def_map:
-                cpt_def_map[cpt_id] = file.rel
-
+        char_pos = 0
+        for line in file.content.splitlines(keepends=True):
+            for m in cpt_def.finditer(line):
+                cpt_id = m.group(1)
+                if cpt_id not in cpt_def_map:
+                    cpt_def_map[cpt_id] = (file.rel, char_pos + m.start())
+            char_pos += len(line)
     edges: list[dict[str, Any]] = []
     edge_id = 0
     for file in files:
-        seen_targets: set[str] = set()
-        for line in file.content.splitlines():
-            if cpt_def.search(line):
-                continue
-            for m in cpt_ref.finditer(line):
-                cpt_id = m.group(1)
-                target = cpt_def_map.get(cpt_id)
-                if target and target != file.rel and target not in seen_targets:
-                    seen_targets.add(target)
-                    edges.append({
-                        "id": f"cpt-{edge_id}",
-                        "from": file.rel,
-                        "to": target,
-                        "type": "cpt",
-                        "arrows": "to",
-                    })
-                    edge_id += 1
-
+        pair_refs: dict[str, list[dict[str, str]]] = {}
+        char_pos = 0
+        line_num = 0
+        for line in file.content.splitlines(keepends=True):
+            line_num += 1
+            if not cpt_def.search(line):
+                for m in cpt_ref.finditer(line):
+                    cpt_id = m.group(1)
+                    _def_info = cpt_def_map.get(cpt_id)
+                    target = _def_info[0] if _def_info else None
+                    if target and target != file.rel:
+                        snippet = cpt_paragraph(file.content, char_pos + m.start())
+                        if target not in pair_refs:
+                            pair_refs[target] = []
+                        if not any(
+                            r['cpt_id'] == cpt_id and r['snippet'] == snippet
+                            for r in pair_refs[target]
+                        ):
+                            _def_rel, _def_pos = _def_info  # type: ignore[misc]
+                            _def_content = file_content_map.get(_def_rel, "")
+                            _def_snip = cpt_def_snippet(_def_content, _def_pos) if _def_content else ""
+                            _def_line = _def_content[:_def_pos].count('\n') + 1 if _def_content else 0
+                            pair_refs[target].append({
+                                "cpt_id": cpt_id,
+                                "snippet": snippet,
+                                "ref_line": line_num,
+                                "def_snippet": _def_snip,
+                                "def_line": _def_line,
+                            })
+            char_pos += len(line)
+        for target, refs in pair_refs.items():
+            edges.append({
+                "id": f"cpt-{edge_id}",
+                "from": file.rel,
+                "to": target,
+                "type": "cpt",
+                "arrows": "to",
+                "refs": refs,
+            })
+            edge_id += 1
     return edges
 
 
@@ -714,7 +838,7 @@ def compute_category_layout(
 
     def _print_snapshot(snapshot: rectpack.StackedLayoutSnapshot) -> None:
         print(
-            f"[md-map] iteration {snapshot.iteration}: "
+            f"[md-fabric] iteration {snapshot.iteration}: "
             f"total={snapshot.metrics.total_width}x{snapshot.metrics.total_height} "
             f"aspect={snapshot.metrics.total_aspect:.3f} "
             f"density={snapshot.metrics.total_density:.3f} "
@@ -722,7 +846,7 @@ def compute_category_layout(
         )
         for category in snapshot.categories:
             print(
-                f"[md-map]   {category.category_id}: {category.width}x{category.height} "
+                f"[md-fabric]   {category.category_id}: {category.width}x{category.height} "
                 f"density={category.density:.3f} rows={category.row_count} candidate={category.candidate_index}"
             )
 
@@ -817,7 +941,7 @@ def compute_category_layout(
         if verbose:
             candidates = category_inputs[-1]["candidates"]
             print(
-                f"[md-map] category {cat_id}: buckets={len(bkeys)} candidates={len(candidates)} "
+                f"[md-fabric] category {cat_id}: buckets={len(bkeys)} candidates={len(candidates)} "
                 f"best={candidates[0].width}x{candidates[0].height} "
                 f"aspect={candidates[0].aspect:.3f} density={candidates[0].density:.3f} rows={candidates[0].row_count}"
             )
@@ -839,7 +963,7 @@ def compute_category_layout(
             target_aspect=TARGET_ASPECT,
         )
         print(
-            f"[md-map] final: total={final_metrics.total_width}x{final_metrics.total_height} "
+            f"[md-fabric] final: total={final_metrics.total_width}x{final_metrics.total_height} "
             f"aspect={final_metrics.total_aspect:.3f} density={final_metrics.total_density:.3f} "
             f"category_density={final_metrics.total_category_density:.3f}"
         )
@@ -978,13 +1102,13 @@ def compute_category_layout(
             chosen_label = "rectpack"
             if verbose:
                 print(
-                    f"[md-map] category repack kept: total={repacked_metrics.total_width}x{repacked_metrics.total_height} "
+                    f"[md-fabric] category repack kept: total={repacked_metrics.total_width}x{repacked_metrics.total_height} "
                     f"aspect={repacked_metrics.total_aspect:.3f} density={repacked_metrics.total_density:.3f} "
                     f"category_density={repacked_metrics.total_category_density:.3f}"
                 )
         elif verbose:
             print(
-                f"[md-map] category repack rolled back: candidate total={repacked_metrics.total_width}x{repacked_metrics.total_height} "
+                f"[md-fabric] category repack rolled back: candidate total={repacked_metrics.total_width}x{repacked_metrics.total_height} "
                 f"aspect={repacked_metrics.total_aspect:.3f} density={repacked_metrics.total_density:.3f} "
                 f"category_density={repacked_metrics.total_category_density:.3f}"
             )
@@ -1040,19 +1164,19 @@ def compute_category_layout(
             chosen_label = "affinity"
             if verbose:
                 print(
-                    f"[md-map] category affinity layout kept: total={best_affinity_metrics.total_width}x{best_affinity_metrics.total_height} "
+                    f"[md-fabric] category affinity layout kept: total={best_affinity_metrics.total_width}x{best_affinity_metrics.total_height} "
                     f"aspect={best_affinity_metrics.total_aspect:.3f} density={best_affinity_metrics.total_density:.3f} "
                     f"category_density={best_affinity_metrics.total_category_density:.3f}"
                 )
         elif verbose:
             print(
-                f"[md-map] category affinity layout rolled back: candidate total={best_affinity_metrics.total_width}x{best_affinity_metrics.total_height} "
+                f"[md-fabric] category affinity layout rolled back: candidate total={best_affinity_metrics.total_width}x{best_affinity_metrics.total_height} "
                 f"aspect={best_affinity_metrics.total_aspect:.3f} density={best_affinity_metrics.total_density:.3f} "
                 f"category_density={best_affinity_metrics.total_category_density:.3f}"
             )
 
     if verbose and chosen_label == "stacked":
-        print("[md-map] final category placement kept stacked layout")
+        print("[md-fabric] final category placement kept stacked layout")
 
     for entry, candidate in zip(category_inputs, best_choices):
         cat_id = entry["cat_id"]
@@ -1733,6 +1857,338 @@ def render_html(
     flex: none;
     width: 84px;
   }}
+
+  #tooltip h4 {{
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+  }}
+
+  .tt-l1 {{
+    font-size: 13px;
+    font-weight: 700;
+    color: #1a1a2e;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }}
+
+  .tt-l2 {{
+    font-size: 11px;
+    font-family: monospace;
+    color: #555;
+    font-weight: 400;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }}
+
+  .tt-l3 {{
+    font-size: 11px;
+    color: #667;
+    font-weight: 400;
+    line-height: 1.4;
+  }}
+
+  .tt-link {{
+    color: #0055cc;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    font-weight: 600;
+  }}
+
+  .tt-link:hover {{
+    color: #003399;
+  }}
+
+  .ldt-toast {{
+    position: fixed;
+    z-index: 40;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(760px, calc(100vw - 48px));
+    max-height: min(520px, calc(100vh - 48px));
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+    padding: 16px;
+    overflow: hidden;
+    flex-direction: column;
+  }}
+
+  .ldt-header {{
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 10px;
+    flex-shrink: 0;
+    gap: 12px;
+  }}
+
+  .ldt-titles {{
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }}
+
+  .ldt-title {{
+    font-size: 14px;
+    font-weight: 700;
+    color: #1a1a2e;
+  }}
+
+  .ldt-subtitle {{
+    font-size: 11px;
+    color: #667;
+    font-family: monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }}
+
+  .ldt-count {{
+    font-size: 12px;
+    color: #555;
+    margin-bottom: 8px;
+    flex-shrink: 0;
+  }}
+
+  .ldt-close {{
+    cursor: pointer;
+    border: none;
+    background: none;
+    font-size: 18px;
+    color: #888;
+    line-height: 1;
+    padding: 2px 4px;
+    flex-shrink: 0;
+  }}
+
+  .ldt-close:hover {{
+    color: #333;
+  }}
+
+  .ldt-table-wrap {{
+    overflow-y: auto;
+    flex: 1;
+  }}
+
+  .ldt-table {{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }}
+
+  .ldt-table th {{
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 2px solid #eee;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: #667;
+    position: sticky;
+    top: 0;
+    background: white;
+    z-index: 1;
+    cursor: pointer;
+    user-select: none;
+  }}
+
+  .ldt-table th:hover {{ color: #333; background: #f5f5f5; }}
+  .ldt-table th.ldt-th-active {{ background: #eef3ff !important; color: #0044cc !important; }}
+
+  .ldt-table th.ldt-num, .ldt-table td.ldt-num {{
+    text-align: right;
+  }}
+
+  .ldt-table td {{
+    padding: 5px 8px;
+    border-bottom: 1px solid #f0f0f0;
+    font-family: monospace;
+    word-break: break-all;
+  }}
+
+  .ldt-table tbody tr {{
+    cursor: pointer;
+    transition: background 0.1s;
+  }}
+
+  .ldt-table tbody tr:hover {{ background: #f0f4ff; }}
+
+  .cpt-cards-wrap {{
+    overflow-y: auto;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-right: 4px;
+  }}
+
+  .cpt-card {{
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    flex-shrink: 0;
+  }}
+
+  .cpt-card-header {{
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #f0f4ff;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-family: monospace;
+    font-weight: 700;
+    color: #0044aa;
+    border-bottom: 1px solid #d8e0f0;
+    border-radius: 8px 8px 0 0;
+    word-break: break-all;
+  }}
+
+  .cpt-card-refs {{
+    padding: 6px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }}
+
+  .cpt-ref-row {{
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }}
+
+  .cpt-ref-id {{
+    font-size: 11px;
+    font-family: monospace;
+    font-weight: 700;
+    color: #7744cc;
+  }}
+
+  .cpt-ref-snippet {{
+    font-size: 11px;
+    font-family: monospace;
+    color: #444;
+    background: #fafafa;
+    border-left: 3px solid #d0d0e8;
+    padding: 3px 8px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-radius: 0 4px 4px 0;
+    max-height: 160px;
+    overflow-y: auto;
+  }}
+
+  .cpt-hl {{
+    background: #fff3c0;
+    border-radius: 2px;
+    padding: 0 1px;
+  }}
+  .cpt-def-hl {{
+    background: #c8f0d0;
+    border-radius: 2px;
+    padding: 0 1px;
+  }}
+  .edt-toast {{
+    width: min(820px, calc(100vw - 48px));
+    max-height: min(640px, calc(100vh - 48px));
+  }}
+  .edt-tabs {{
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+    border-bottom: 2px solid #e0e0e0;
+    margin-bottom: 10px;
+  }}
+  .edt-tab {{
+    padding: 5px 14px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    color: #778;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    border-radius: 6px 6px 0 0;
+    transition: color 0.12s, background 0.12s;
+  }}
+  .edt-tab:hover:not(:disabled) {{
+    color: #334;
+    background: #f0f0f0;
+  }}
+  .edt-tab.edt-tab-active {{
+    color: #0044cc;
+    border-bottom-color: #0044cc;
+  }}
+  .edt-tab:disabled {{
+    opacity: 0.35;
+    cursor: not-allowed;
+  }}
+  .edt-tab-panel {{
+    overflow-y: auto;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+  }}
+  .edt-select-row {{
+    flex-shrink: 0;
+  }}
+  .edt-select {{
+    width: 100%;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 12px;
+    background: #fff;
+    box-sizing: border-box;
+  }}
+  .edt-snippet-wrap {{
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+  }}
+  .edt-section {{
+    border: 1px solid #dde;
+    border-radius: 7px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }}
+  .edt-section-header {{
+    background: #f4f6ff;
+    padding: 5px 11px;
+    font-size: 11px;
+    font-family: monospace;
+    font-weight: 700;
+    color: #334;
+    border-bottom: 1px solid #dde;
+    word-break: break-all;
+  }}
+  .edt-section-header.edt-def-header {{
+    background: #f0fff4;
+    border-bottom-color: #c8ecd4;
+    color: #1a5c2a;
+  }}
+  .edt-section-body {{
+    padding: 6px 10px;
+    font-size: 11px;
+    font-family: monospace;
+    color: #444;
+    background: #fafafa;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 180px;
+    overflow-y: auto;
+  }}
 </style>
 </head>
 <body>
@@ -1807,6 +2263,66 @@ def render_html(
   </div>
 </div>
 
+<div id="linksDetailToast" class="ldt-toast" style="display:none">
+  <div class="ldt-header">
+    <div class="ldt-titles">
+      <div class="ldt-title" id="ldtTitle">File links</div>
+      <div class="ldt-subtitle" id="ldtSubtitle"></div>
+    </div>
+    <button class="ldt-close" id="ldtClose" title="Close (ESC)">&#x2715;</button>
+  </div>
+  <div class="ldt-count" id="ldtCount"></div>
+  <div class="ldt-table-wrap">
+    <table class="ldt-table" id="ldtTable">
+      <thead><tr>
+        <th data-col="path" data-label="File path">File path</th>
+        <th data-col="loc" data-label="LOC" class="ldt-num">LOC</th>
+        <th data-col="links" data-label="Links" class="ldt-num">Links</th>
+      </tr></thead>
+      <tbody id="ldtBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="cptDetailToast" class="ldt-toast" style="display:none">
+  <div class="ldt-header">
+    <div class="ldt-titles">
+      <div class="ldt-title" id="cdtTitle">CPT references</div>
+      <div class="ldt-subtitle" id="cdtSubtitle"></div>
+    </div>
+    <button class="ldt-close" id="cdtClose" title="Close (ESC)">&#x2715;</button>
+  </div>
+  <div class="ldt-count" id="cdtCount"></div>
+  <div class="cpt-cards-wrap" id="cdtCards"></div>
+</div>
+
+<div id="edgeDetailToast" class="ldt-toast edt-toast" style="display:none">
+  <div class="ldt-header">
+    <div class="ldt-titles">
+      <div class="ldt-title" id="edtTitle">Link details</div>
+      <div class="ldt-subtitle" id="edtSubtitle"></div>
+    </div>
+    <button class="ldt-close" id="edtClose" title="Close (ESC)">&#x2715;</button>
+  </div>
+  <div class="edt-tabs">
+    <button class="edt-tab" id="edtTabFile" data-tab="file">File links</button>
+    <button class="edt-tab" id="edtTabCpt" data-tab="cpt">CPT links</button>
+  </div>
+  <div class="edt-tab-panel" id="edtFilePanel">
+    <div class="edt-select-row" id="edtFileSelectRow">
+      <select id="edtFileSelect" class="edt-select"></select>
+    </div>
+    <div id="edtFileSnippet" class="edt-snippet-wrap"></div>
+  </div>
+  <div class="edt-tab-panel" id="edtCptPanel" style="display:none">
+    <div class="edt-select-row" id="edtCptSelectRow">
+      <select id="edtCptSelect" class="edt-select"></select>
+    </div>
+    <div id="edtCptRefSection" class="edt-section"></div>
+    <div id="edtCptDefSection" class="edt-section" style="display:none"></div>
+  </div>
+</div>
+
 {data_script_tag}
 <script>
 const groupRects   = {json.dumps(rects, ensure_ascii=False)};
@@ -1846,6 +2362,31 @@ const outLinkCount = new Map();
 for (const edge of rawEdges) {{
   outLinkCount.set(edge.from, (outLinkCount.get(edge.from) || 0) + 1);
   inLinkCount.set(edge.to,   (inLinkCount.get(edge.to)   || 0) + 1);
+}}
+
+const cptOutboundAdj = new Map();
+const cptInboundAdj = new Map();
+const cptOutLinkCount = new Map();
+const cptInLinkCount = new Map();
+rawCptEdges.forEach(edge => {{
+  if (!cptOutboundAdj.has(edge.from)) cptOutboundAdj.set(edge.from, []);
+  cptOutboundAdj.get(edge.from).push({{ to: edge.to, refs: edge.refs || [] }});
+  if (!cptInboundAdj.has(edge.to)) cptInboundAdj.set(edge.to, []);
+  cptInboundAdj.get(edge.to).push({{ from: edge.from, refs: edge.refs || [] }});
+  cptOutLinkCount.set(edge.from, (cptOutLinkCount.get(edge.from) || 0) + 1);
+  cptInLinkCount.set(edge.to,   (cptInLinkCount.get(edge.to)   || 0) + 1);
+}});
+
+const cptEdgeById = new Map(rawCptEdges.map(e => [e.id, e]));
+const pairFileEdges = new Map();
+for (const edge of rawEdges) {{
+  const key = edge.from + "\x00" + edge.to;
+  if (!pairFileEdges.has(key)) pairFileEdges.set(key, []);
+  pairFileEdges.get(key).push(edge);
+}}
+const pairCptEdge = new Map();
+for (const edge of rawCptEdges) {{
+  pairCptEdge.set(edge.from + "\x00" + edge.to, edge);
 }}
 
 const container = document.getElementById("graph");
@@ -2363,9 +2904,54 @@ function showNodeTooltip(nodeId) {{
   const node = nodeById.get(nodeId);
   if (!node) return;
 
-  const title = node.loc ? `${{node.label}} — ${{node.loc}} lines` : node.label;
-  showTooltipMarkdown(title, node.preview || "_(empty file)_", () => positionNodeTooltip(nodeId));
+  tooltipIsEdge = false;
+  if (tooltipHideTimer) {{ clearTimeout(tooltipHideTimer); tooltipHideTimer = null; }}
+
+  const outCount    = outLinkCount.get(nodeId)    || 0;
+  const inCount     = inLinkCount.get(nodeId)     || 0;
+  const cptOut      = cptOutLinkCount.get(nodeId) || 0;
+  const cptIn       = cptInLinkCount.get(nodeId)  || 0;
+  const safeLabel   = escapeHtml(node.label || "");
+  const safePath    = escapeHtml(nodeId);
+  const locStr      = node.loc ? ` \u2014 ${{node.loc}} lines` : "";
+
+  tooltipTitle.innerHTML =
+    `<span class="tt-l1">${{safeLabel}}${{locStr}}</span>` +
+    `<span class="tt-l2">${{safePath}}</span>` +
+    `<span class="tt-l3">` +
+    `File links \u2014 ` +
+    `<a class="tt-link" data-node="${{safePath}}" data-dir="out" data-kind="file">${{outCount}}&nbsp;outbound</a>` +
+    ` / <a class="tt-link" data-node="${{safePath}}" data-dir="in" data-kind="file">${{inCount}}&nbsp;inbound</a>` +
+    `, CPT refs \u2014 ` +
+    `<a class="tt-link" data-node="${{safePath}}" data-dir="out" data-kind="cpt">${{cptOut}}&nbsp;outbound</a>` +
+    ` / <a class="tt-link" data-node="${{safePath}}" data-dir="in" data-kind="cpt">${{cptIn}}&nbsp;inbound</a>` +
+    `</span>`;
+
+  const markdown = node.preview || "_(empty file)_";
+  if (window.marked) {{
+    tooltipBody.innerHTML = marked.parse(markdown);
+  }} else {{
+    tooltipBody.textContent = markdown;
+  }}
+
+  tooltip.style.display = "block";
+  tooltip.dataset.kind = "markdown";
+  requestAnimationFrame(() => positionNodeTooltip(nodeId));
 }}
+
+tooltipTitle.addEventListener("click", e => {{
+  const link = e.target.closest(".tt-link");
+  if (!link) return;
+  e.stopPropagation();
+  const nid  = link.dataset.node;
+  const dir  = link.dataset.dir;
+  const kind = link.dataset.kind;
+  if (kind === "file") {{
+    showLinksDetailToast(nid, dir);
+  }} else if (kind === "cpt") {{
+    showCptDetailToast(nid, dir);
+  }}
+}});
 
 function showNodePreview(nodeId) {{
   previewedNode = nodeId;
@@ -2641,10 +3227,16 @@ function hideTooltip() {{
   tooltip.dataset.kind = "";
 }}
 
+function isDetailToastOpen() {{
+  return document.getElementById("linksDetailToast").style.display === "flex" ||
+         document.getElementById("cptDetailToast").style.display === "flex" ||
+         document.getElementById("edgeDetailToast").style.display === "flex";
+}}
+
 function scheduleHideTooltip() {{
   if (tooltipHideTimer) clearTimeout(tooltipHideTimer);
   tooltipHideTimer = setTimeout(() => {{
-    if (tooltip.dataset.hover !== "1") hideTooltip();
+    if (tooltip.dataset.hover !== "1" && !isDetailToastOpen()) hideTooltip();
     tooltipHideTimer = null;
   }}, 90);
 }}
@@ -2801,8 +3393,15 @@ network.on("click", params => {{
     }}
     drawMiniMap();
   }} else if (params.edges.length) {{
-    selectedEdge = params.edges[0];
-    showEdgeTooltip(selectedEdge);
+    const clickedEdgeId = params.edges[0];
+    const isCptEdge = typeof clickedEdgeId === "string" && clickedEdgeId.startsWith("cpt-");
+    if (isCptEdge) {{
+      const cptEdge = cptEdgeById.get(clickedEdgeId);
+      if (cptEdge) showEdgeDetailToast(cptEdge.from, cptEdge.to, "cpt");
+    }} else {{
+      const fileEdge = edgeById.get(clickedEdgeId);
+      if (fileEdge) showEdgeDetailToast(fileEdge.from, fileEdge.to, "file");
+    }}
   }} else {{
     clearHighlight();
   }}
@@ -2839,6 +3438,302 @@ searchInput.addEventListener("input", () => {{
   }}
 }});
 
+let ldtSort = {{ col: null, dir: "desc" }};
+let ldtData = [];
+
+function ldtGetVal(row, col) {{
+  if (col === "path")  return row.id;
+  if (col === "loc")   return row.loc || 0;
+  if (col === "links") return row.links;
+  return row.id;
+}}
+
+function renderLdtRows() {{
+  let rows = [...ldtData];
+  if (ldtSort.col) {{
+    const dir = ldtSort.dir === "desc" ? -1 : 1;
+    rows.sort((a, b) => {{
+      const va = ldtGetVal(a, ldtSort.col);
+      const vb = ldtGetVal(b, ldtSort.col);
+      return (typeof va === "string" ? va.localeCompare(vb) : va - vb) * dir;
+    }});
+  }}
+  const tbody = document.getElementById("ldtBody");
+  tbody.innerHTML = "";
+  for (const row of rows) {{
+    const tr = document.createElement("tr");
+    const pathTd = document.createElement("td");
+    pathTd.textContent = row.id;
+    pathTd.title = row.id;
+    const locTd = document.createElement("td");
+    locTd.className = "ldt-num";
+    locTd.textContent = row.loc != null ? row.loc : "\u2014";
+    const linksTd = document.createElement("td");
+    linksTd.className = "ldt-num";
+    linksTd.textContent = row.links;
+    tr.addEventListener("click", () => {{
+      document.getElementById("linksDetailToast").style.display = "none";
+      document.getElementById("searchResultsToast").style.display = "none";
+      selectNodeById(row.id);
+      network.focus(row.id, {{ scale: Math.max(network.getScale(), 1), animation: {{ duration: 400, easingFunction: "easeInOutQuad" }} }});
+      drawMiniMap();
+      setTimeout(() => showNodePreview(row.id), 450);
+    }});
+    tr.appendChild(pathTd);
+    tr.appendChild(locTd);
+    tr.appendChild(linksTd);
+    tbody.appendChild(tr);
+  }}
+  document.querySelectorAll("#ldtTable th[data-col]").forEach(th => {{
+    const col = th.dataset.col;
+    const label = th.dataset.label;
+    if (col === ldtSort.col) {{
+      th.classList.add("ldt-th-active");
+      th.textContent = label + (ldtSort.dir === "desc" ? " \u25bc" : " \u25b2");
+    }} else {{
+      th.classList.remove("ldt-th-active");
+      th.textContent = label;
+    }}
+  }});
+}}
+
+function showLinksDetailToast(nodeId, dir) {{
+  const adj = dir === "out" ? outboundAdjacency : inboundAdjacency;
+  const links = adj.get(nodeId) || [];
+  const fileCounts = new Map();
+  for (const link of links) {{
+    const fid = dir === "out" ? link.to : link.from;
+    fileCounts.set(fid, (fileCounts.get(fid) || 0) + 1);
+  }}
+  ldtData = [...fileCounts.entries()].map(([id, cnt]) => {{
+    const n = nodeById.get(id);
+    return {{ id, loc: n ? n.loc : null, links: cnt }};
+  }});
+  ldtSort = {{ col: "links", dir: "desc" }};
+  const node = nodeById.get(nodeId);
+  const label = node ? node.label : nodeId;
+  const dirLabel = dir === "out" ? "Outbound" : "Inbound";
+  document.getElementById("ldtTitle").textContent = `${{dirLabel}} file links`;
+  document.getElementById("ldtSubtitle").textContent = label;
+  document.getElementById("ldtCount").textContent = `${{ldtData.length}} linked file${{ldtData.length !== 1 ? "s" : ""}}`;
+  renderLdtRows();
+  document.getElementById("linksDetailToast").style.display = "flex";
+}}
+
+document.getElementById("ldtClose").addEventListener("click", () => {{
+  document.getElementById("linksDetailToast").style.display = "none";
+  scheduleHideTooltip();
+}});
+
+document.querySelectorAll("#ldtTable th[data-col]").forEach(th => {{
+  th.addEventListener("click", () => {{
+    const col = th.dataset.col;
+    if (ldtSort.col === col) {{
+      ldtSort.dir = ldtSort.dir === "desc" ? "asc" : "desc";
+    }} else {{
+      ldtSort = {{ col, dir: "desc" }};
+    }}
+    renderLdtRows();
+  }});
+}});
+
+function highlightCptInSnippet(snippet, cptId) {{
+  const escaped = escapeHtml(snippet);
+  const safeId = escapeHtml(cptId);
+  return escaped.split('`' + safeId + '`').join('<mark class="cpt-hl">`' + safeId + '`</mark>');
+}}
+
+function showCptDetailToast(nodeId, dir) {{
+  const adj = dir === "out" ? cptOutboundAdj : cptInboundAdj;
+  const entries = adj.get(nodeId) || [];
+  const node = nodeById.get(nodeId);
+  const label = node ? node.label : nodeId;
+  const dirLabel = dir === "out" ? "Outbound" : "Inbound";
+  document.getElementById("cdtTitle").textContent = `${{dirLabel}} CPT references`;
+  document.getElementById("cdtSubtitle").textContent = label;
+
+  let totalRefs = 0;
+  const container = document.getElementById("cdtCards");
+  container.innerHTML = "";
+
+  for (const entry of entries) {{
+    const peerId = dir === "out" ? entry.to : entry.from;
+    const refs   = entry.refs || [];
+    totalRefs += refs.length;
+
+    const card = document.createElement("div");
+    card.className = "cpt-card";
+
+    const header = document.createElement("div");
+    header.className = "cpt-card-header";
+    header.textContent = (dir === "out" ? "\u2192 " : "\u2190 ") + peerId;
+    card.appendChild(header);
+
+    const refsDiv = document.createElement("div");
+    refsDiv.className = "cpt-card-refs";
+    for (const ref of refs) {{
+      const row = document.createElement("div");
+      row.className = "cpt-ref-row";
+
+      const idSpan = document.createElement("div");
+      idSpan.className = "cpt-ref-id";
+      idSpan.textContent = "`" + ref.cpt_id + "`";
+      row.appendChild(idSpan);
+
+      if (ref.snippet) {{
+        const snip = document.createElement("div");
+        snip.className = "cpt-ref-snippet";
+        snip.innerHTML = highlightCptInSnippet(ref.snippet, ref.cpt_id);
+        row.appendChild(snip);
+      }}
+      refsDiv.appendChild(row);
+    }}
+    card.appendChild(refsDiv);
+    container.appendChild(card);
+  }}
+
+  document.getElementById("cdtCount").textContent =
+    `${{entries.length}} file${{entries.length !== 1 ? "s" : ""}}, ${{totalRefs}} CPT reference${{totalRefs !== 1 ? "s" : ""}}`;
+  document.getElementById("cptDetailToast").style.display = "flex";
+}}
+
+document.getElementById("cdtClose").addEventListener("click", () => {{
+  document.getElementById("cptDetailToast").style.display = "none";
+  scheduleHideTooltip();
+}});
+
+let edtFrom = "";
+let edtTo = "";
+let edtFileEdges = [];
+let edtCptRefs = [];
+
+function showEdgeDetailToast(from, to, preferTab) {{
+  const key = from + "\x00" + to;
+  edtFrom = from;
+  edtTo = to;
+  edtFileEdges = pairFileEdges.get(key) || [];
+  const cptEdge = pairCptEdge.get(key);
+  edtCptRefs = cptEdge ? (cptEdge.refs || []) : [];
+
+  const fromName = String(from).split("/").pop() || from;
+  const toName   = String(to).split("/").pop()   || to;
+  document.getElementById("edtTitle").textContent    = fromName + " \u2192 " + toName;
+  document.getElementById("edtSubtitle").textContent = from + " \u2192 " + to;
+
+  const tabFile = document.getElementById("edtTabFile");
+  const tabCpt  = document.getElementById("edtTabCpt");
+  const hasFile = edtFileEdges.length > 0;
+  const hasCpt  = edtCptRefs.length > 0;
+
+  tabFile.textContent = "File links (" + edtFileEdges.length + ")";
+  tabCpt.textContent  = "CPT links ("  + edtCptRefs.length  + ")";
+  tabFile.disabled = !hasFile;
+  tabCpt.disabled  = !hasCpt;
+
+  let activeTab = preferTab;
+  if (activeTab === "file" && !hasFile) activeTab = hasCpt ? "cpt" : "file";
+  if (activeTab === "cpt"  && !hasCpt)  activeTab = hasFile ? "file" : "cpt";
+
+  renderEdtTab(activeTab);
+  document.getElementById("edgeDetailToast").style.display = "flex";
+}}
+
+function renderEdtTab(tab) {{
+  document.getElementById("edtTabFile").classList.toggle("edt-tab-active", tab === "file");
+  document.getElementById("edtTabCpt").classList.toggle("edt-tab-active",  tab === "cpt");
+  document.getElementById("edtFilePanel").style.display = tab === "file" ? "flex" : "none";
+  document.getElementById("edtCptPanel").style.display  = tab === "cpt"  ? "flex" : "none";
+  if (tab === "file") renderEdtFileTab();
+  else                renderEdtCptTab();
+}}
+
+function renderEdtFileTab() {{
+  const sel       = document.getElementById("edtFileSelect");
+  const selRow    = document.getElementById("edtFileSelectRow");
+  const snippetEl = document.getElementById("edtFileSnippet");
+
+  if (edtFileEdges.length <= 1) {{
+    selRow.style.display = "none";
+  }} else {{
+    selRow.style.display = "block";
+    sel.innerHTML = "";
+    edtFileEdges.forEach((edge, i) => {{
+      const opt = document.createElement("option");
+      opt.value = i;
+      const lm = edge.preview_html ? edge.preview_html.match(/snip-match[^>]*>.*?snip-ln[^>]*>(\\d+)/s) : null;
+      opt.textContent = "Link " + (i + 1) + (lm ? " \u2014 line " + lm[1] : "");
+      sel.appendChild(opt);
+    }});
+    sel.onchange = () => renderEdtFileSnippet(parseInt(sel.value, 10));
+  }}
+  renderEdtFileSnippet(0);
+}}
+
+function renderEdtFileSnippet(idx) {{
+  const snippetEl = document.getElementById("edtFileSnippet");
+  const edge = edtFileEdges[idx];
+  snippetEl.innerHTML = edge ? (edge.preview_html || "(no preview)") : "";
+}}
+
+function renderEdtCptTab() {{
+  const sel    = document.getElementById("edtCptSelect");
+  const selRow = document.getElementById("edtCptSelectRow");
+
+  if (edtCptRefs.length <= 1) {{
+    selRow.style.display = "none";
+  }} else {{
+    selRow.style.display = "block";
+    sel.innerHTML = "";
+    edtCptRefs.forEach((ref, i) => {{
+      const opt = document.createElement("option");
+      opt.value = i;
+      opt.textContent = "`" + ref.cpt_id + "`" + (ref.ref_line ? " — line " + ref.ref_line : "");
+      sel.appendChild(opt);
+    }});
+    sel.onchange = () => renderEdtCptRef(parseInt(sel.value, 10));
+  }}
+  renderEdtCptRef(0);
+}}
+
+function renderEdtCptRef(idx) {{
+  const refSection = document.getElementById("edtCptRefSection");
+  const defSection = document.getElementById("edtCptDefSection");
+  const ref = edtCptRefs[idx];
+  if (!ref) {{ refSection.innerHTML = ""; defSection.style.display = "none"; return; }}
+
+  const refLineStr = ref.ref_line ? " - line " + ref.ref_line : "";
+  refSection.innerHTML =
+    '<div class="edt-section-header">Reference from ' + escapeHtml(edtFrom) + escapeHtml(refLineStr) + '</div>' +
+    '<div class="edt-section-body">' + highlightCptInSnippet(ref.snippet || "", ref.cpt_id) + '</div>';
+
+  if (ref.def_snippet) {{
+    const defLineStr = ref.def_line ? " - line " + ref.def_line : "";
+    defSection.innerHTML =
+      '<div class="edt-section-header edt-def-header">Definition in ' + escapeHtml(edtTo) + escapeHtml(defLineStr) + '</div>' +
+      '<div class="edt-section-body">' + highlightCptDefInSnippet(ref.def_snippet, ref.cpt_id) + '</div>';
+    defSection.style.display = "block";
+  }} else {{
+    defSection.style.display = "none";
+  }}
+}}
+
+function highlightCptDefInSnippet(snippet, cptId) {{
+  const escaped = escapeHtml(snippet);
+  const safeId  = escapeHtml(cptId);
+  return escaped.split('`' + safeId + '`').join('<mark class="cpt-def-hl">`' + safeId + '`</mark>');
+}}
+
+document.getElementById("edtClose").addEventListener("click", () => {{
+  document.getElementById("edgeDetailToast").style.display = "none";
+  scheduleHideTooltip();
+}});
+document.getElementById("edtTabFile").addEventListener("click", () => {{
+  if (!document.getElementById("edtTabFile").disabled) renderEdtTab("file");
+}});
+document.getElementById("edtTabCpt").addEventListener("click", () => {{
+  if (!document.getElementById("edtTabCpt").disabled) renderEdtTab("cpt");
+}});
+
 document.addEventListener("keydown", e => {{
   if (e.shiftKey && ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"].includes(e.key)) {{
     const directionMap = {{ ArrowRight: "right", ArrowLeft: "left", ArrowUp: "up", ArrowDown: "down" }};
@@ -2848,7 +3743,19 @@ document.addEventListener("keydown", e => {{
     }}
   }}
   if (e.key !== "Escape") return;
-  if (tooltip.style.display === "block") {{
+  if (document.getElementById("edgeDetailToast").style.display === "flex") {{
+    document.getElementById("edgeDetailToast").style.display = "none";
+    scheduleHideTooltip();
+    e.stopPropagation();
+  }} else if (document.getElementById("cptDetailToast").style.display === "flex") {{
+    document.getElementById("cptDetailToast").style.display = "none";
+    scheduleHideTooltip();
+    e.stopPropagation();
+  }} else if (document.getElementById("linksDetailToast").style.display === "flex") {{
+    document.getElementById("linksDetailToast").style.display = "none";
+    scheduleHideTooltip();
+    e.stopPropagation();
+  }} else if (tooltip.style.display === "block") {{
     hideTooltip();
   }} else if (document.getElementById("searchResultsToast").style.display === "flex") {{
     document.getElementById("searchResultsToast").style.display = "none";
@@ -3007,7 +3914,7 @@ attachControlTooltip(
   `Controls which **link types** are shown on the graph.
 
 - **File reference**: solid arrows for direct markdown file links.
-- **CPT ID reference**: dashed purple arrows for CPT ID references (\`cpt-*\`) between files.
+- **CPT ID reference**: dashed purple arrows for CPT ID references (\\`cpt-*\\`) between files.
 - **File & CPT ID reference**: both types; if a direct file link already covers the same pair, the CPT arrow is hidden.`
 );
 suppressControlTooltipOnInteract(referenceType);
@@ -3153,7 +4060,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate an interactive Markdown map and dependency graph.")
     parser.add_argument("--repo", default=".", help="Repository root.")
     parser.add_argument("--config", default=None, help="Optional TOML config path.")
-    parser.add_argument("--out", default="md-map.html", help="Output HTML file.")
+    parser.add_argument("--out", default="md-fabric.html", help="Output HTML file.")
     parser.add_argument("--inline-data", action="store_true", help="Embed graph data into HTML instead of writing a separate JS file.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print layout optimization debug info.")
     args = parser.parse_args()
