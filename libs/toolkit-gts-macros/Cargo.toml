@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 description = "ToolKit GTS proc-macros (#[gts_schema] attribute + gts_instance! function-like macro)"
 readme = "README.md"
-keywords = ["constructorfabric", "cf-gears-toolkit"]
+keywords = ["constructorfabric", "cf-gears", "cf-gears-toolkit"]
 categories = ["development-tools::procedural-macro-helpers"]
 metadata.docs.rs.all-features = true
 

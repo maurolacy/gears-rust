@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 description = "ToolKit GTS integration — link-time inventory of shipped GTS schemas and instances plus a small set of platform base types"
 readme = "README.md"
-keywords = ["constructorfabric", "cf-gears-toolkit"]
+keywords = ["constructorfabric", "cf-gears", "cf-gears-toolkit"]
 categories = ["development-tools"]
 metadata.docs.rs.all-features = true
 

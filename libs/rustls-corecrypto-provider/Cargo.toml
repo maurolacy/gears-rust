@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 description = "rustls CryptoProvider routing TLS crypto through Apple's FIPS 140-3-validated corecrypto module via Security.framework + CommonCrypto on macOS. The crate itself is a *consumer* of the validated module; CMVP-validation belongs to Apple, not to this crate. See README 'FIPS claim boundaries' before relying on the claim."
 readme = "README.md"
-keywords = ["rustls", "crypto", "tls", "fips", "macos"]
+keywords = ["constructorfabric", "cf-gears", "rustls", "crypto", "tls"]
 categories = ["cryptography"]
 metadata.docs.rs.all-features = true
 
