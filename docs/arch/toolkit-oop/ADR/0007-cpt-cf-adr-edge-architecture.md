@@ -114,9 +114,11 @@ External Client
 
 ### The Invariant
 
-**Downstream gears always see `SecurityContext`, never provider-specific credentials.** Whether the user logged in via
-the built-in identity broker, Tyk Identity Broker, Keycloak, or Auth0 — by the time the request reaches an application
-gear, it carries the same `SecurityContext` with the same `subject_id`, `tenant_id`, scopes, and bearer token format.
+**Downstream gears always see a normalized `SecurityContext`, never provider-specific credentials.** Whether the user
+logged in via the built-in identity broker, Tyk Identity Broker, Keycloak, or Auth0 — by the time the request reaches
+an application gear, `SecurityContext.subject_id`, `SecurityContext.tenant_id`, and scopes carry the same normalized
+claim values. Mode B1 may preserve the trusted-issuer token format on the wire (no exchange), but `authn-resolver`
+always produces an identical `SecurityContext` regardless of which issuer minted the bearer token.
 
 This is enforced by the **authn-resolver contract**: it validates only platform tokens and explicitly configured
 trusted-issuer tokens. It does not parse Tyk-specific claims, Kong JWT plugin headers, or provider-specific ID tokens.
@@ -133,7 +135,7 @@ trusted-issuer tokens. It does not parse Tyk-specific claims, Kong JWT plugin he
 * `authn-resolver` remains a token validation service. It gains an optional "trusted issuer" configuration for Mode B1 (
   accept tokens from a configured external issuer without exchange), but does NOT learn about social providers or login
   flows.
-* The `GatewayProvider` abstraction (ADR-0005) handles route registration in both modes: `ToolKitGatewayProvider` for
+* The `GatewayProvider` abstraction (ADR-0003) handles route registration in both modes: `ToolKitGatewayProvider` for
   Mode A, `KongGatewayProvider` / `TykGatewayProvider` for Mode B.
 * In Mode B, the built-in api-gateway may be bypassed entirely (external gateway routes directly to gears) or retained
   as an internal routing layer. This is a deployment choice, not an architectural one.
@@ -206,12 +208,12 @@ Add Tyk/Kong/Keycloak-specific token parsing and claims mapping directly into au
 
 ### Relationship to Other ADRs
 
-- **ADR-0002 (Auth at Edge Only)**: complements this ADR — auth-at-edge applies in both modes; the "edge" is either the
-  built-in gateway (Mode A) or the external gateway (Mode B).
-- **ADR-0005 (Gateway Abstraction)**: the `GatewayProvider` trait enables Mode B route registration with external
+- **ADR-0008 (Two-Plane Auth)**: complements this ADR — per-hop JWT re-validation applies in both modes; the "edge" is
+  either the built-in gateway (Mode A) or the external gateway (Mode B).
+- **ADR-0003 (Gateway Abstraction)**: the `GatewayProvider` trait enables Mode B route registration with external
   gateways.
-- **ADR-0008 (Internal Gear Auth)**: internal gear auth (bootstrap token / SA tokens) is orthogonal to edge mode —
-  it secures system calls regardless of which edge stack is deployed.
+- **ADR-0006 (Platform-Plane Authentication)**: platform-plane auth (SA tokens first, mTLS+SPIFFE next) is orthogonal
+  to edge mode — it secures system calls regardless of which edge stack is deployed.
 
 ## Traceability
 
@@ -225,4 +227,4 @@ This decision directly addresses the following requirements or design elements:
 * `cpt-cf-fr-identity-broker` — Motivates the identity broker as a separate subsystem.
 * `cpt-cf-fr-token-exchange` — Defines the Mode B2 token exchange pattern.
 * `cpt-cf-component-gateway-provider` — GatewayProvider enables both edge modes.
-* `cpt-cf-adr-auth-edge-only` — Auth-at-edge applies regardless of which edge is in use.
+* `cpt-cf-adr-two-plane-auth` — Per-hop JWT re-validation applies regardless of which edge is in use.

@@ -56,8 +56,8 @@ surface minimal and allowing new implementations to be added without framework c
   `register_routes` after the HTTP server starts.
 * In Profile 3, the operator configures a `KongGatewayProvider` (or similar) via the platform config. The framework
   provides the trait; the k8s-specific adapter is a separate crate.
-* Gears that only expose internal APIs (no public routes) skip gateway registration entirely. The `api_visibility`
-  metadata on OperationBuilder routes determines this.
+* Gears that only expose internal APIs (no public routes) skip gateway registration entirely. The `OperationSpec.is_public`
+  flag (set via `OperationBuilder::public()`) on each route determines this.
 * The `GatewayProvider` trait is async (network I/O is required for external gateway admin APIs), which constrains it to
   be used via `Box<dyn GatewayProvider>` or `Arc<dyn GatewayProvider>` rather than static dispatch.
 
