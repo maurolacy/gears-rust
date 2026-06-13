@@ -480,7 +480,11 @@ mod tests {
             .get_instance("gts.cf.toolkit.authz.permission.v1~cf.mini_chat._.nonexistent.v1")
             .await;
         assert!(
-            result.is_err() && result.unwrap_err().is_not_found(),
+            result.is_err()
+                && matches!(
+                    result.unwrap_err(),
+                    toolkit_canonical_errors::CanonicalError::NotFound { .. }
+                ),
             "unknown permission id must produce NotFound"
         );
     }

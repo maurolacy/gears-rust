@@ -19,6 +19,8 @@ name = "credstore"
 workspace = true
 
 [dependencies]
+# Trait boundaries of consumed SDKs are `CanonicalError` (ADR 0005).
+toolkit-canonical-errors = { workspace = true }
 credstore-sdk = { workspace = true }
 types-registry-sdk = { workspace = true }
 

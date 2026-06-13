@@ -75,8 +75,9 @@ use account_management_sdk::{
 };
 use serde_json::Value;
 use tenant_resolver_sdk::TenantId;
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_odata::{ODataQuery, Page};
-use types_registry_sdk::{TypesRegistryClient, TypesRegistryError};
+use types_registry_sdk::TypesRegistryClient;
 
 use crate::config::AccountManagementConfig;
 use crate::domain::error::DomainError;
@@ -299,7 +300,7 @@ impl<R: TenantRepo> TenantService<R> {
             // counter plus the dedicated `am.tenant.service` warn
             // event below; recovery is a registry restore or a
             // backfill of the missing schema, not a silent fake.
-            Err(TypesRegistryError::GtsTypeSchemaNotFound(_)) => {
+            Err(CanonicalError::NotFound { .. }) => {
                 tracing::warn!(
                     target: "am.tenant.service",
                     tenant_id = %tenant.id,
