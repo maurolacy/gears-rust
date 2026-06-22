@@ -363,3 +363,6 @@ testing/e2e/logs/
 *.backup*
 .cf-studio/config/kits/sdlc/*
 .cf-studio/.cache/explore/*
+
+# Cached checkout of the web docs site for `make docs-preview`
+.web-docs-preview/

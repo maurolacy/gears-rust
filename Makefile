@@ -215,7 +215,7 @@ validate-gear-names:
 # |             | - Use 'make dylint-list' to see all available custom lints           |
 # +-------------+----------------------------------------------------------------------+
 
-.PHONY: clippy clippy-deep lychee kani geiger safety lint dylint dylint-list dylint-test shear gts-docs cfs-ensure cfs-repair cfs-validate cfs-validate-kits cfs-validate-kit-local cfs-spec-coverage
+.PHONY: clippy clippy-deep lychee docs-preview kani geiger safety lint dylint dylint-list dylint-test shear gts-docs cfs-ensure cfs-repair cfs-validate cfs-validate-kits cfs-validate-kit-local cfs-spec-coverage
 
 CFS ?= cfs
 CFS_PIPX_SPEC ?= git+https://github.com/constructorfabric/studio.git
@@ -290,7 +290,12 @@ cfs-validate-kit-local: cfs-repair
 # Run markdown checks with 'lychee'
 lychee:
 	$(call check_tool,lychee)
-	lychee docs examples tools/dylint_lints guidelines
+	lychee --exclude-path 'docs/web-docs' docs examples tools/dylint_lints guidelines
+
+# Preview the documentation website with local docs/web-docs content.
+# Clones the web docs site into .web-docs-preview/ and serves it at localhost:4321.
+docs-preview:
+	@bash tools/scripts/docs-preview.sh
 
 ## The Kani Rust Verifier for checking safety of the code
 kani:
