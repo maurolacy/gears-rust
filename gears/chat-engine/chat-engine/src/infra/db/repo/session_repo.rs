@@ -633,8 +633,9 @@ impl SessionRepo for SeaSessionRepo {
                         return Ok(false);
                     };
 
-                    // Cascade reactions first (they FK onto messages).
-                    let message_ids: Vec<Uuid> = MessageEntity::find()
+                    // Load (id, parent) for every message so we can delete the
+                    // tree leaves-first below.
+                    let messages: Vec<(Uuid, Option<Uuid>)> = MessageEntity::find()
                         .secure()
                         .scope_with(&scope)
                         .filter(
@@ -643,9 +644,12 @@ impl SessionRepo for SeaSessionRepo {
                         .all(tx)
                         .await?
                         .into_iter()
-                        .map(|m| m.message_id)
+                        .map(|m| (m.message_id, m.parent_message_id))
                         .collect();
-                    if !message_ids.is_empty() {
+
+                    if !messages.is_empty() {
+                        let message_ids: Vec<Uuid> = messages.iter().map(|(id, _)| *id).collect();
+                        // Cascade reactions first (they FK onto messages).
                         ReactionEntity::delete_many()
                             .secure()
                             .scope_with(&scope)
@@ -656,16 +660,44 @@ impl SessionRepo for SeaSessionRepo {
                             )
                             .exec(tx)
                             .await?;
-                    }
 
-                    MessageEntity::delete_many()
-                        .secure()
-                        .scope_with(&scope)
-                        .filter(
-                            Condition::all().add(message_entity::Column::SessionId.eq(session_id)),
-                        )
-                        .exec(tx)
-                        .await?;
+                        // Delete messages leaves-first: `fk_messages_parent` is
+                        // RESTRICT, so a single bulk delete trips the
+                        // self-referential FK when a parent row is removed while
+                        // a child still references it. We can't NULL the parent
+                        // links instead — that collapses children to roots and
+                        // collides on the `uq_messages_session_root_variant`
+                        // partial unique index. Each wave deletes the current
+                        // leaves (ids that are not a parent of any survivor);
+                        // `message_parts` cascade off `fk_message_parts_message`.
+                        let mut remaining: std::collections::HashMap<Uuid, Option<Uuid>> =
+                            messages.into_iter().collect();
+                        while !remaining.is_empty() {
+                            let parents: std::collections::HashSet<Uuid> = remaining
+                                .values()
+                                .filter_map(|p| *p)
+                                .filter(|p| remaining.contains_key(p))
+                                .collect();
+                            let leaves: Vec<Uuid> = remaining
+                                .keys()
+                                .copied()
+                                .filter(|id| !parents.contains(id))
+                                .collect();
+                            MessageEntity::delete_many()
+                                .secure()
+                                .scope_with(&scope)
+                                .filter(
+                                    Condition::all().add(
+                                        message_entity::Column::MessageId.is_in(leaves.clone()),
+                                    ),
+                                )
+                                .exec(tx)
+                                .await?;
+                            for id in &leaves {
+                                remaining.remove(id);
+                            }
+                        }
+                    }
 
                     SessionEntity::delete_many()
                         .secure()

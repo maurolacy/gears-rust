@@ -877,29 +877,35 @@ impl MessageRepo for SeaMessageRepo {
         let summary_id = Uuid::new_v4();
         let now = OffsetDateTime::now_utc();
 
-        let summary_active = message_entity::ActiveModel {
-            message_id: Set(summary_id),
-            session_id: Set(session_id),
-            // Inherits the owning tenant; system-generated, so no human author.
-            tenant_id: Set(tenant_id),
-            user_id: Set(None),
-            parent_message_id: Set(None),
-            role: Set(message_entity::MessageRole::System),
-            file_ids: Set(None),
-            variant_index: Set(0),
-            is_active: Set(true),
-            is_complete: Set(true),
-            is_hidden_from_user: Set(true),
-            is_hidden_from_backend: Set(false),
-            metadata: Set(metadata),
-            created_at: Set(now),
-        };
-
         let summarized = summarized_ids.clone();
         self.db
             .transaction_with_config(TxConfig::serializable(), move |tx| {
                 Box::pin(async move {
                     let scope = AccessScope::allow_all();
+                    // The summary is a new root (parent_message_id = NULL).
+                    // `uq_messages_session_root_variant` forbids two roots in
+                    // the same session sharing a variant_index, so it must take
+                    // the next free root index — hardcoding 0 collides with the
+                    // session's first user message.
+                    let variant_index =
+                        compute_next_variant_index(tx, session_id, None).await?;
+                    let summary_active = message_entity::ActiveModel {
+                        message_id: Set(summary_id),
+                        session_id: Set(session_id),
+                        // Inherits the owning tenant; system-generated, no author.
+                        tenant_id: Set(tenant_id),
+                        user_id: Set(None),
+                        parent_message_id: Set(None),
+                        role: Set(message_entity::MessageRole::System),
+                        file_ids: Set(None),
+                        variant_index: Set(variant_index),
+                        is_active: Set(true),
+                        is_complete: Set(true),
+                        is_hidden_from_user: Set(true),
+                        is_hidden_from_backend: Set(false),
+                        metadata: Set(metadata),
+                        created_at: Set(now),
+                    };
                     MessageEntity::insert(summary_active)
                         .secure()
                         .scope_unchecked(&scope)?
