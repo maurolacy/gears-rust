@@ -57,12 +57,18 @@ fn content_type(response: &Response) -> &str {
         .unwrap_or("")
 }
 
-fn www_authenticate(response: &Response) -> &str {
+/// All `WWW-Authenticate` header values, in order. Empty if none.
+///
+/// Returning every value (rather than the first) lets assertions also catch a
+/// stacked/duplicate challenge, which RFC 7235 permits but the `Bearer` scheme
+/// makes ambiguous to parse.
+fn www_authenticate_all(response: &Response) -> Vec<&str> {
     response
         .headers()
-        .get(header::WWW_AUTHENTICATE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
+        .get_all(header::WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect()
 }
 
 /// Test configuration provider
@@ -939,11 +945,11 @@ async fn test_missing_token_returns_401() {
     );
     assert_eq!(content_type(&response), PROBLEM_JSON);
     // RFC 6750 §3: no credentials were presented, so the challenge carries a
-    // `realm` auth-param but no `error` code.
+    // `realm` auth-param but no `error` code. Exactly one challenge — no dup.
     assert_eq!(
-        www_authenticate(&response),
-        r#"Bearer realm="api""#,
-        "Missing token should emit a WWW-Authenticate challenge"
+        www_authenticate_all(&response),
+        [r#"Bearer realm="api""#],
+        "Missing token should emit a single WWW-Authenticate challenge"
     );
     let problem = problem_from(response).await;
     assert_eq!(problem.problem_type, UNAUTHENTICATED_TYPE);
@@ -973,11 +979,11 @@ async fn test_invalid_token_returns_401() {
     );
     assert_eq!(content_type(&response), PROBLEM_JSON);
     // RFC 6750 §3.1: a token was presented but rejected, so the challenge
-    // carries the `invalid_token` error code.
+    // carries the `invalid_token` error code. Exactly one challenge — no dup.
     assert_eq!(
-        www_authenticate(&response),
-        r#"Bearer error="invalid_token""#,
-        "Invalid token should emit a WWW-Authenticate challenge"
+        www_authenticate_all(&response),
+        [r#"Bearer error="invalid_token""#],
+        "Invalid token should emit a single WWW-Authenticate challenge"
     );
     let problem = problem_from(response).await;
     assert_eq!(problem.problem_type, UNAUTHENTICATED_TYPE);
@@ -1008,7 +1014,7 @@ async fn test_no_plugin_available_returns_503() {
     assert_eq!(content_type(&response), PROBLEM_JSON);
     // A 503 is an infrastructure failure, not a credential rejection, so it
     // must not carry a bearer challenge.
-    assert_eq!(www_authenticate(&response), "");
+    assert!(www_authenticate_all(&response).is_empty());
     let problem = problem_from(response).await;
     assert_eq!(problem.problem_type, SERVICE_UNAVAILABLE_TYPE);
     assert_eq!(problem.context["retry_after_seconds"], 5);
@@ -1039,7 +1045,7 @@ async fn test_service_unavailable_returns_503() {
     assert_eq!(content_type(&response), PROBLEM_JSON);
     // A 503 is an infrastructure failure, not a credential rejection, so it
     // must not carry a bearer challenge.
-    assert_eq!(www_authenticate(&response), "");
+    assert!(www_authenticate_all(&response).is_empty());
     let problem = problem_from(response).await;
     assert_eq!(problem.problem_type, SERVICE_UNAVAILABLE_TYPE);
     assert_eq!(problem.context["retry_after_seconds"], 5);
@@ -1069,7 +1075,7 @@ async fn test_internal_error_returns_500() {
     assert_eq!(content_type(&response), PROBLEM_JSON);
     // A 500 is an infrastructure failure, not a credential rejection, so it
     // must not carry a bearer challenge.
-    assert_eq!(www_authenticate(&response), "");
+    assert!(www_authenticate_all(&response).is_empty());
     let problem = problem_from(response).await;
     assert_eq!(problem.problem_type, INTERNAL_TYPE);
 }
@@ -1222,11 +1228,11 @@ async fn test_insufficient_scope_returns_403_with_challenge() {
     );
     assert_eq!(content_type(&response), PROBLEM_JSON);
     // RFC 6750 §3.1: a valid token lacked the required scope, so the challenge
-    // carries the `insufficient_scope` error code.
+    // carries the `insufficient_scope` error code. Exactly one challenge — no dup.
     assert_eq!(
-        www_authenticate(&response),
-        r#"Bearer error="insufficient_scope""#,
-        "Insufficient scope should emit a WWW-Authenticate challenge"
+        www_authenticate_all(&response),
+        [r#"Bearer error="insufficient_scope""#],
+        "Insufficient scope should emit a single WWW-Authenticate challenge"
     );
     let problem = problem_from(response).await;
     assert_eq!(problem.problem_type, PERMISSION_DENIED_TYPE);
@@ -1256,5 +1262,5 @@ async fn test_wildcard_scope_passes_enforcement() {
         "Wildcard scope should satisfy any route policy"
     );
     // A successful response must not carry a bearer challenge.
-    assert_eq!(www_authenticate(&response), "");
+    assert!(www_authenticate_all(&response).is_empty());
 }
