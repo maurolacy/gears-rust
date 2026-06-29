@@ -4,7 +4,7 @@
 //! Blobs are stored at `<root>/<sanitized-path>`. The opaque path
 //! (`/{file_id}/{version_id}`) is sanitized to prevent traversal outside root.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -96,7 +96,10 @@ impl StorageBackend for LocalFsBackend {
         };
         // `resolve` yields an inclusive end; clamp defensively against `total`.
         let end = end.min(total.saturating_sub(1));
-        let len = usize::try_from(end - start + 1).unwrap_or(usize::MAX);
+        // Fail cleanly on an oversized range instead of asking the allocator for
+        // `usize::MAX` (which would turn it into an OOM/panic path).
+        let len = usize::try_from(end - start + 1)
+            .map_err(|_| DomainError::validation("range", "requested byte range is too large"))?;
         file.seek(std::io::SeekFrom::Start(start))
             .await
             .map_err(|e| self.io_err(e))?;
@@ -119,10 +122,12 @@ impl StorageBackend for LocalFsBackend {
 
     async fn exists(&self, path: &str) -> Result<bool, DomainError> {
         let target = self.resolve(path)?;
-        Ok(target_exists(&target).await)
+        // Only a genuine "not found" means absent; permission/IO errors are real
+        // failures and must not be silently reported as a missing blob.
+        match tokio::fs::metadata(&target).await {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(self.io_err(e)),
+        }
     }
-}
-
-async fn target_exists(p: &Path) -> bool {
-    tokio::fs::metadata(p).await.is_ok()
 }

@@ -50,9 +50,11 @@ async def test_list_storages_returns_capabilities(base_url, api_base, auth_heade
         r = await client.get(f"{base_url}{api_base}/storages", headers=auth_headers)
     assert r.status_code == 200, f"expected 200, got {r.status_code}: {r.text}"
     assert r.headers.get("content-type", "").startswith("application/json")
+    # Lock the wire format: GET /storages returns a top-level JSON array
+    # (Json(Vec<StorageDto>)). Accepting alternative envelopes here would let a
+    # breaking shape change slip through this seam.
     data = r.json()
-    storages = data if isinstance(data, list) else data.get("items", data.get("storages"))
-    assert isinstance(storages, list), f"storages must be a list, got: {data!r}"
+    assert isinstance(data, list), f"GET /storages must return a JSON array, got: {data!r}"
 
 
 @pytest.mark.asyncio
@@ -70,8 +72,11 @@ async def test_create_file_returns_signed_upload_url(base_url, api_base, auth_he
     for field in ("file_id", "version_id", "upload_url"):
         assert field in data, f"missing field {field!r} in: {data!r}"
     assert isinstance(data["file_id"], str)
-    # The signed URL is opaque but must target the sidecar, not the backend.
-    assert "upload_url" in data and data["upload_url"], "upload_url must be present"
+    # Backend opacity: the signed URL must route through the sidecar data-plane
+    # (`/api/file-storage-data/...`), never expose a raw backend URL.
+    assert "/api/file-storage-data/" in data["upload_url"], (
+        f"upload_url must target the sidecar data-plane, got: {data['upload_url']!r}"
+    )
 
 
 @pytest.mark.asyncio

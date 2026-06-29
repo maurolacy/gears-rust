@@ -4,10 +4,15 @@
 //! (`cpt-cf-file-storage-fr-backend-config-source`). M0 pinned the basic knobs;
 //! the backend table and data-plane URL are added here.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the `file-storage` gear.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is implemented manually so the `signing_key_seed` private key is never
+/// printed (a config dump must not leak the URL-signing key).
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileStorageConfig {
     /// Default URL TTL (seconds) applied to every signed URL the control plane
@@ -46,6 +51,24 @@ pub struct FileStorageConfig {
     /// the sidecar must be reconfigured. Configure this in any real deployment.
     #[serde(default)]
     pub signing_key_seed: Option<String>,
+}
+
+impl fmt::Debug for FileStorageConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileStorageConfig")
+            .field("default_url_ttl_secs", &self.default_url_ttl_secs)
+            .field("max_url_ttl_secs", &self.max_url_ttl_secs)
+            .field("sidecar_base_url", &self.sidecar_base_url)
+            .field("default_page_size", &self.default_page_size)
+            .field("max_page_size", &self.max_page_size)
+            .field("storage_root", &self.storage_root)
+            // Never print the signing key — only whether one is configured.
+            .field(
+                "signing_key_seed",
+                &self.signing_key_seed.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for FileStorageConfig {
