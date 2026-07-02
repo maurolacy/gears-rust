@@ -19,9 +19,9 @@ use file_storage_sdk::{CustomMetadataPatch, NewFile, OwnerFilter, OwnerKind};
 
 use super::dto::{
     BindReq, CreateFileReq, CreateRetentionRuleReq, DownloadTicketDto, EffectivePolicyDto, FileDto,
-    InitiateMultipartReq, MigrateBackendReq, MultipartPartPlanDto, MultipartPlanDto, PolicyDto,
-    RetentionRuleDto, SetPolicyReq, StorageDto, TransferOwnershipReq, UpdateMetadataReq,
-    UploadTicketDto, VersionDto,
+    FileDtoList, InitiateMultipartReq, MigrateBackendReq, MultipartPartPlanDto, MultipartPlanDto,
+    PolicyDto, RetentionRuleDto, RetentionRuleDtoList, SetPolicyReq, StorageDto, StorageDtoList,
+    TransferOwnershipReq, UpdateMetadataReq, UploadTicketDto, VersionDto, VersionDtoList,
 };
 use crate::domain::error::DomainError;
 use crate::domain::etag;
@@ -166,7 +166,7 @@ pub async fn list_files(
     Extension(ctx): Ctx,
     Extension(svc): Svc,
     Query(q): Query<ListQuery>,
-) -> ApiResult<JsonBody<Vec<FileDto>>> {
+) -> ApiResult<JsonBody<FileDtoList>> {
     let owner_kind = OwnerKind::parse(&q.owner_kind)
         .ok_or_else(|| DomainError::validation("owner_kind", "must be 'user' or 'app'"))?;
     let owner = OwnerFilter {
@@ -176,20 +176,22 @@ pub async fn list_files(
     let files = svc
         .list_files(&ctx, owner, q.limit, q.offset.unwrap_or(0))
         .await?;
-    let dtos = files
+    let items = files
         .into_iter()
         .map(|f| FileDto::from_parts(f, vec![]))
         .collect();
-    Ok(Json(dtos))
+    Ok(Json(FileDtoList(items)))
 }
 
 pub async fn list_versions(
     Extension(ctx): Ctx,
     Extension(svc): Svc,
     Path(file_id): Path<Uuid>,
-) -> ApiResult<JsonBody<Vec<VersionDto>>> {
+) -> ApiResult<JsonBody<VersionDtoList>> {
     let versions = svc.list_versions(&ctx, file_id).await?;
-    Ok(Json(versions.into_iter().map(VersionDto::from).collect()))
+    Ok(Json(VersionDtoList(
+        versions.into_iter().map(VersionDto::from).collect(),
+    )))
 }
 
 pub async fn download_url(
@@ -249,13 +251,13 @@ pub async fn delete_version(
 
 // ── storages ────────────────────────────────────────────────────────────────────
 
-pub async fn list_storages(Extension(svc): Svc) -> ApiResult<JsonBody<Vec<StorageDto>>> {
-    let storages = svc
+pub async fn list_storages(Extension(svc): Svc) -> ApiResult<JsonBody<StorageDtoList>> {
+    let items = svc
         .list_backends()
         .into_iter()
         .map(|(id, caps)| StorageDto::new(id, caps))
         .collect();
-    Ok(Json(storages))
+    Ok(Json(StorageDtoList(items)))
 }
 
 pub async fn get_storage(
@@ -340,11 +342,11 @@ pub async fn get_effective_policy(
 pub async fn list_retention_rules(
     Extension(ctx): Ctx,
     Extension(svc): PolicySvc,
-) -> ApiResult<JsonBody<Vec<RetentionRuleDto>>> {
+) -> ApiResult<JsonBody<RetentionRuleDtoList>> {
     let rules = svc.list_retention_rules(&ctx).await?;
-    Ok(Json(
+    Ok(Json(RetentionRuleDtoList(
         rules.into_iter().map(RetentionRuleDto::from).collect(),
-    ))
+    )))
 }
 
 /// `POST /retention-rules` — create a new retention rule.

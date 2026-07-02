@@ -150,7 +150,7 @@ pub(crate) fn register_routes(
         .tag(API_TAG)
         .path_param("id", "File UUID")
         .handler(handlers::list_versions)
-        .json_response_with_schema::<Vec<dto::VersionDto>>(openapi, StatusCode::OK, "Versions")
+        .json_response_with_schema::<dto::VersionDtoList>(openapi, StatusCode::OK, "Versions")
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
@@ -247,7 +247,7 @@ pub(crate) fn register_routes(
         .query_param_typed("limit", false, "Page size", "integer")
         .query_param_typed("offset", false, "Offset", "integer")
         .handler(handlers::list_files)
-        .json_response_with_schema::<Vec<dto::FileDto>>(openapi, StatusCode::OK, "Files")
+        .json_response_with_schema::<dto::FileDtoList>(openapi, StatusCode::OK, "Files")
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
@@ -262,7 +262,7 @@ pub(crate) fn register_routes(
         .summary("List configured storage backends and capabilities")
         .tag(API_TAG)
         .handler(handlers::list_storages)
-        .json_response_with_schema::<Vec<dto::StorageDto>>(openapi, StatusCode::OK, "Backends")
+        .json_response_with_schema::<dto::StorageDtoList>(openapi, StatusCode::OK, "Backends")
         .error_401(openapi)
         .error_403(openapi)
         .error_500(openapi)
@@ -358,7 +358,7 @@ pub(crate) fn register_routes(
         .summary("List all retention rules for the caller's tenant")
         .tag(API_TAG)
         .handler(handlers::list_retention_rules)
-        .json_response_with_schema::<Vec<dto::RetentionRuleDto>>(
+        .json_response_with_schema::<dto::RetentionRuleDtoList>(
             openapi,
             StatusCode::OK,
             "Retention rules",

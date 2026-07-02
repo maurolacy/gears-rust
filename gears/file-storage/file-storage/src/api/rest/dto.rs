@@ -165,6 +165,26 @@ impl From<FileVersion> for VersionDto {
     }
 }
 
+/// List of file versions (`GET /files/{id}/versions`).
+// Transparent newtype: serializes as a bare JSON array (wire format unchanged)
+// while registering a unique OpenAPI schema name, so file-storage list responses
+// do not collide with other gears in the shared `Vec` schema-name slot.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(transparent)]
+pub struct VersionDtoList(pub Vec<VersionDto>);
+
+impl toolkit::api::api_dto::ResponseApiDto for VersionDtoList {}
+
+/// List of files (`GET /files`).
+// Transparent newtype: serializes as a bare JSON array (wire format unchanged)
+// while registering a unique OpenAPI schema name, so file-storage list responses
+// do not collide with other gears in the shared `Vec` schema-name slot.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(transparent)]
+pub struct FileDtoList(pub Vec<FileDto>);
+
+impl toolkit::api::api_dto::ResponseApiDto for FileDtoList {}
+
 /// Backend capabilities surface for `GET /storages`.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
@@ -202,6 +222,16 @@ impl StorageDto {
         }
     }
 }
+
+/// List of configured storage backends (`GET /storages`).
+// Transparent newtype: serializes as a bare JSON array (wire format unchanged)
+// while registering a unique OpenAPI schema name, so file-storage list responses
+// do not collide with other gears in the shared `Vec` schema-name slot.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(transparent)]
+pub struct StorageDtoList(pub Vec<StorageDto>);
+
+impl toolkit::api::api_dto::ResponseApiDto for StorageDtoList {}
 
 // ── Policy DTOs (P2-M1) ────────────────────────────────────────────────────────
 
@@ -556,6 +586,16 @@ impl From<StoredRetentionRule> for RetentionRuleDto {
         }
     }
 }
+
+/// List of retention rules (`GET /retention-rules`).
+// Transparent newtype: serializes as a bare JSON array (wire format unchanged)
+// while registering a unique OpenAPI schema name, so file-storage list responses
+// do not collide with other gears in the shared `Vec` schema-name slot.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(transparent)]
+pub struct RetentionRuleDtoList(pub Vec<RetentionRuleDto>);
+
+impl toolkit::api::api_dto::ResponseApiDto for RetentionRuleDtoList {}
 
 /// Request body to create a retention rule (`POST /retention-rules`).
 #[derive(Debug, Clone)]
