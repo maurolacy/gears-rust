@@ -35,9 +35,7 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-inventory = { workspace = true }
 futures = { workspace = true }
-async-stream = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

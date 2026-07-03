@@ -1294,7 +1294,6 @@ name = "cf-chat-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-stream",
  "async-trait",
  "axum",
  "bytes",
@@ -1309,7 +1308,6 @@ dependencies = [
  "cf-gears-toolkit-security",
  "futures",
  "http",
- "inventory",
  "k8s-openapi",
  "kube",
  "parking_lot",
