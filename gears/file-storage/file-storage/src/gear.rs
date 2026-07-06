@@ -70,13 +70,12 @@ impl Gear for FileStorageGear {
 
         let db: Arc<DBProvider<DbError>> = Arc::new(ctx.db_required()?);
 
-        // P1 static backends: a local filesystem backend (default) plus an
-        // in-memory backend, satisfying the "≥2 backend types" target.
-        let local: Arc<dyn StorageBackend> =
-            Arc::new(LocalFsBackend::new(LOCAL_FS_ID, &cfg.storage_root));
-        let memory: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new(MEMORY_ID));
-        let backends = BackendRegistry::new(vec![local, memory], LOCAL_FS_ID)
-            .map_err(|e| anyhow::anyhow!("backend registry: {e}"))?;
+        // P1 static backends: a local filesystem backend (always present)
+        // plus an optional in-memory backend, satisfying the "≥2 backend
+        // types" target for dev/test without shipping a non-durable backend
+        // to every deployment by default.
+        let backends =
+            build_backend_registry(&cfg).map_err(|e| anyhow::anyhow!("backend registry: {e}"))?;
 
         // URL-signing key. A configured seed yields a keypair that is stable
         // across restarts (so the sidecar's public key keeps verifying issued
@@ -202,6 +201,23 @@ impl Gear for FileStorageGear {
         info!("{} gear initialized", Self::MODULE_NAME);
         Ok(())
     }
+}
+
+/// Builds the backend registry from config: `local-fs` is always present and
+/// is the default; the non-durable `memory` backend only joins when
+/// `cfg.enable_in_memory_backend` is set (dev/test opt-in — see
+/// `FileStorageConfig::enable_in_memory_backend`). Extracted as a free
+/// function so it is unit-testable without a live `GearCtx`.
+fn build_backend_registry(
+    cfg: &FileStorageConfig,
+) -> Result<BackendRegistry, crate::domain::error::DomainError> {
+    let local: Arc<dyn StorageBackend> =
+        Arc::new(LocalFsBackend::new(LOCAL_FS_ID, &cfg.storage_root));
+    let mut backend_list: Vec<Arc<dyn StorageBackend>> = vec![local];
+    if cfg.enable_in_memory_backend {
+        backend_list.push(Arc::new(InMemoryBackend::new(MEMORY_ID)));
+    }
+    BackendRegistry::new(backend_list, LOCAL_FS_ID)
 }
 
 impl DatabaseCapability for FileStorageGear {

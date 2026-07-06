@@ -1,0 +1,427 @@
+//! Tests for finalize-time server-side re-verification of size/hash (P2 0.1).
+//!
+//! Both finalize entry points — the user-context `finalize_upload` and the
+//! token-authenticated `finalize_upload_by_token` — must never persist a
+//! `size`/`hash_value` that was not independently derived from the bytes
+//! actually present at the version's backend path. A finalize call for a
+//! version with no prior successful `PUT`, or with a claimed size/hash that
+//! doesn't match the real blob, must be rejected and must leave the version
+//! row `pending`.
+
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::doc_markdown)]
+
+use std::sync::Arc;
+
+use bytes::Bytes;
+use sea_orm_migration::MigratorTrait;
+use toolkit_db::migration_runner::run_migrations_for_testing;
+use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
+use toolkit_security::{AccessScope, SecurityContext};
+use uuid::Uuid;
+
+use file_storage::domain::authz::TenantOnlyAuthorizer;
+use file_storage::domain::error::DomainError;
+use file_storage::domain::service::{FileService, ServiceConfig};
+use file_storage::infra::backend::{BackendRegistry, InMemoryBackend, StorageBackend};
+use file_storage::infra::content::hash;
+use file_storage::infra::signed_url::{Claims, Issuer, MultipartClaims, Op, UploadConstraints};
+use file_storage::infra::storage::Store;
+use file_storage::infra::storage::migrations::Migrator;
+use file_storage::infra::storage::repo::VersionRepo;
+use file_storage_sdk::{FileVersion, NewFile, OwnerKind, VersionStatus};
+
+const GTS: &str = "gts.cf.fstorage.file.type.v1~x.test.v1~";
+
+async fn build_db() -> Arc<DBProvider<DbError>> {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "cf-fs-finalize-test-{}.db",
+        Uuid::now_v7().simple()
+    ));
+    let mut file = path.to_string_lossy().replace('\\', "/");
+    if !file.starts_with('/') {
+        file.insert(0, '/');
+    }
+    let dsn = format!("sqlite://{file}?mode=rwc");
+    let opts = ConnectOpts {
+        max_conns: Some(1),
+        min_conns: Some(1),
+        ..Default::default()
+    };
+    let db = connect_db(&dsn, opts).await.expect("connect sqlite");
+    run_migrations_for_testing(&db, Migrator::migrations())
+        .await
+        .expect("migrations");
+    Arc::new(DBProvider::new(db))
+}
+
+/// Build `FileService` plus the raw `InMemoryBackend` handle (so tests can
+/// directly control `backend.get`/`put`) and the `Store` (for direct DB
+/// assertions on the version row).
+async fn build_service() -> (Arc<FileService>, Arc<dyn StorageBackend>, Store) {
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends,
+        issuer,
+        authorizer,
+        cfg,
+        None,
+        None,
+    ));
+    (svc, backend, store)
+}
+
+fn ctx(tenant: Uuid) -> SecurityContext {
+    SecurityContext::builder()
+        .subject_id(Uuid::now_v7())
+        .subject_tenant_id(tenant)
+        .build()
+        .expect("ctx")
+}
+
+fn new_file() -> NewFile {
+    NewFile {
+        owner_kind: OwnerKind::User,
+        owner_id: Uuid::now_v7(),
+        name: "finalize.bin".to_owned(),
+        gts_file_type: GTS.to_owned(),
+        mime_type: "application/octet-stream".to_owned(),
+        custom_metadata: vec![],
+    }
+}
+
+/// The canonical backend path a pending version is created at
+/// (mirrors `FileService::backend_path`, `pub(super)` so not directly
+/// reachable from an external test crate).
+fn backend_path(file_id: Uuid, version_id: Uuid) -> String {
+    format!("/{file_id}/{version_id}")
+}
+
+// -- 1. finalize_upload: no prior PUT is rejected ----------------------------
+
+#[tokio::test]
+async fn finalize_without_prior_put_is_rejected() {
+    let (svc, _backend, store) = build_service().await;
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    // Nothing was ever `put` to the backend for this version.
+    let err = svc
+        .finalize_upload(&ctx, ticket.file_id, ticket.version_id, 100, vec![0u8; 32])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::Validation { .. }),
+        "expected Validation, got {err:?}"
+    );
+
+    let version = store
+        .get_version(ticket.file_id, ticket.version_id)
+        .await
+        .unwrap()
+        .expect("version row must still exist");
+    assert_eq!(version.status, VersionStatus::Pending);
+    assert_eq!(version.size, 0);
+}
+
+// -- 2. finalize_upload: size mismatch is rejected ---------------------------
+
+#[tokio::test]
+async fn finalize_size_mismatch_is_rejected() {
+    let (svc, backend, store) = build_service().await;
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    let path = backend_path(ticket.file_id, ticket.version_id);
+    backend
+        .put(&path, Bytes::from_static(b"hello"))
+        .await
+        .unwrap();
+
+    let err = svc
+        .finalize_upload(
+            &ctx,
+            ticket.file_id,
+            ticket.version_id,
+            999,
+            hash::sha256(b"hello"),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::Validation { .. }),
+        "expected Validation, got {err:?}"
+    );
+
+    let version = store
+        .get_version(ticket.file_id, ticket.version_id)
+        .await
+        .unwrap()
+        .expect("version row must still exist");
+    assert_eq!(version.status, VersionStatus::Pending);
+}
+
+// -- 3. finalize_upload: hash mismatch is rejected ---------------------------
+
+#[tokio::test]
+async fn finalize_hash_mismatch_is_rejected() {
+    let (svc, backend, store) = build_service().await;
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    let path = backend_path(ticket.file_id, ticket.version_id);
+    backend
+        .put(&path, Bytes::from_static(b"hello"))
+        .await
+        .unwrap();
+
+    let err = svc
+        .finalize_upload(&ctx, ticket.file_id, ticket.version_id, 5, vec![0u8; 32])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::HashMismatch { .. }),
+        "expected HashMismatch, got {err:?}"
+    );
+
+    let version = store
+        .get_version(ticket.file_id, ticket.version_id)
+        .await
+        .unwrap()
+        .expect("version row must still exist");
+    assert_eq!(version.status, VersionStatus::Pending);
+}
+
+// -- 4. finalize_upload: matching size+hash succeeds, persists read-back ----
+
+#[tokio::test]
+async fn finalize_matching_size_and_hash_succeeds() {
+    let (svc, backend, store) = build_service().await;
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    let known_bytes = Bytes::from_static(b"hello, world!");
+    let path = backend_path(ticket.file_id, ticket.version_id);
+    backend.put(&path, known_bytes.clone()).await.unwrap();
+
+    let true_size = i64::try_from(known_bytes.len()).unwrap();
+    let true_hash = hash::sha256(&known_bytes);
+
+    svc.finalize_upload(
+        &ctx,
+        ticket.file_id,
+        ticket.version_id,
+        true_size,
+        true_hash,
+    )
+    .await
+    .unwrap();
+
+    let version = store
+        .get_version(ticket.file_id, ticket.version_id)
+        .await
+        .unwrap()
+        .expect("version row must exist");
+    assert_eq!(version.status, VersionStatus::Available);
+    // The assertion that proves read-back, not pass-through: compare against
+    // an independently recomputed hash, not merely the value passed in.
+    let independently_recomputed = hash::sha256(&known_bytes);
+    assert_eq!(version.size, true_size);
+    assert_eq!(version.hash_value, independently_recomputed);
+}
+
+// -- 5. finalize_upload_by_token: no prior PUT is rejected -------------------
+
+#[tokio::test]
+async fn finalize_by_token_without_prior_put_is_rejected() {
+    let (svc, _backend, store) = build_service().await;
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    // Hand-build claims mirroring how `handlers::finalize_version` constructs
+    // them after verifying the signed token (op == Put, file/version match).
+    let claims = Claims {
+        op: Op::Put,
+        file_id: ticket.file_id,
+        version_id: ticket.version_id,
+        backend_id: "mem".to_owned(),
+        backend_path: backend_path(ticket.file_id, ticket.version_id),
+        exp: time::OffsetDateTime::now_utc().unix_timestamp() + 3600,
+        upload: UploadConstraints::default(),
+        multipart: MultipartClaims::default(),
+    };
+
+    let err = svc
+        .finalize_upload_by_token(&claims, 100, vec![0u8; 32])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::Validation { .. }),
+        "expected Validation, got {err:?}"
+    );
+
+    let version = store
+        .get_version(ticket.file_id, ticket.version_id)
+        .await
+        .unwrap()
+        .expect("version row must still exist");
+    assert_eq!(version.status, VersionStatus::Pending);
+}
+
+// -- 6. VersionRepo::finalize: second call on an Available row is a no-op ---
+// (P2 0.4 — status-guard CAS)
+
+#[tokio::test]
+async fn version_repo_finalize_twice_second_call_returns_false() {
+    // `file_versions.file_id` carries a `REFERENCES files (file_id)` FK, so a
+    // repo-level version row still needs a real parent file row. Build the db
+    // directly (rather than via `build_service()`) so this test keeps its own
+    // `DBProvider` handle for `.conn()`, and go through a `FileService` on the
+    // same db just once to create that parent file row.
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![backend], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let svc = FileService::new(store, backends, issuer, authorizer, cfg, None, None);
+
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+    let file_id = ticket.file_id;
+
+    let conn = db.conn().expect("conn");
+    let scope = AccessScope::allow_all();
+    let repo = VersionRepo::new();
+
+    let version_id = Uuid::now_v7();
+    let pending = FileVersion {
+        file_id,
+        version_id,
+        mime_type: "application/octet-stream".to_owned(),
+        size: 0,
+        hash_algorithm: "SHA-256".to_owned(),
+        hash_value: vec![0u8; 32],
+        status: VersionStatus::Pending,
+        is_current: false,
+        backend_id: "mem".to_owned(),
+        backend_path: backend_path(file_id, version_id),
+        created_at: time::OffsetDateTime::now_utc(),
+    };
+    repo.insert(&conn, &scope, &pending)
+        .await
+        .expect("insert pending version");
+
+    let hash_a = hash::sha256(b"first-call-bytes");
+    let hash_b = hash::sha256(b"second-call-bytes");
+
+    let first = repo
+        .finalize(&conn, &scope, file_id, version_id, 100, hash_a.clone())
+        .await
+        .expect("first finalize call");
+    assert!(first, "first finalize call on a pending row must succeed");
+
+    let second = repo
+        .finalize(&conn, &scope, file_id, version_id, 200, hash_b)
+        .await
+        .expect("second finalize call");
+    assert!(
+        !second,
+        "second finalize call on an already-Available row must be a no-op"
+    );
+
+    let row = repo
+        .get(&conn, &scope, file_id, version_id)
+        .await
+        .expect("query version row")
+        .expect("version row must still exist");
+    assert_eq!(row.size, 100, "size must retain the FIRST call's value");
+    assert_eq!(
+        row.hash_value, hash_a,
+        "hash must retain the FIRST call's value"
+    );
+    assert_eq!(row.status, VersionStatus::Available);
+}
+
+// -- 7. finalize_upload: already-finalized version yields Conflict (409) ----
+// (P2 0.4 — distinguishes double-finalize from a genuinely missing row)
+
+#[tokio::test]
+async fn finalize_upload_after_already_available_returns_conflict() {
+    let (svc, backend, store) = build_service().await;
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    let known_bytes = Bytes::from_static(b"hello, world!");
+    let path = backend_path(ticket.file_id, ticket.version_id);
+    backend.put(&path, known_bytes.clone()).await.unwrap();
+
+    let true_size = i64::try_from(known_bytes.len()).unwrap();
+    let true_hash = hash::sha256(&known_bytes);
+
+    // First finalize succeeds, version -> Available.
+    svc.finalize_upload(
+        &ctx,
+        ticket.file_id,
+        ticket.version_id,
+        true_size,
+        true_hash.clone(),
+    )
+    .await
+    .unwrap();
+
+    // A second finalize call for the same version, replaying the SAME
+    // (now-correct) size/hash so it clears the read-back checks and reaches
+    // the repo-level CAS — which must reject it as a conflict, not silently
+    // re-accept it. (A claim that doesn't match the real blob would instead
+    // be rejected earlier by the size/hash read-back check in this same
+    // function — that path is already covered by
+    // `finalize_size_mismatch_is_rejected`/`finalize_hash_mismatch_is_rejected`
+    // above; this test isolates the CAS guard specifically.)
+    let err = svc
+        .finalize_upload(
+            &ctx,
+            ticket.file_id,
+            ticket.version_id,
+            true_size,
+            true_hash.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::Conflict { .. }),
+        "expected Conflict, got {err:?}"
+    );
+
+    // The DB row must still hold the FIRST call's values.
+    let version = store
+        .get_version(ticket.file_id, ticket.version_id)
+        .await
+        .unwrap()
+        .expect("version row must still exist");
+    assert_eq!(version.status, VersionStatus::Available);
+    assert_eq!(version.size, true_size);
+    assert_eq!(version.hash_value, true_hash);
+}

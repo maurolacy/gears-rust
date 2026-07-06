@@ -47,6 +47,20 @@ pub trait CleanupStore: Send + Sync {
         audit: AuditEntry,
     ) -> Result<bool, DomainError>;
 
+    /// Delete a version row iff it is still `pending` + audit, in one
+    /// transaction. Returns `true` if removed.
+    ///
+    /// Status-guarded CAS (P2 0.3 step 5) -- used by the cleanup engine
+    /// instead of [`Self::delete_version`] when reclaiming an expired
+    /// multipart session's pending version, so a version already flipped to
+    /// `available` by a racing `complete_multipart_upload` is never deleted.
+    async fn delete_pending_version(
+        &self,
+        file_id: Uuid,
+        version_id: Uuid,
+        audit: AuditEntry,
+    ) -> Result<bool, DomainError>;
+
     /// List `in_progress` multipart sessions whose `expires_at` is before `now`.
     async fn list_expired_multipart_uploads(
         &self,
@@ -214,6 +228,13 @@ pub trait MultipartStore: Send + Sync {
 /// `Store` implements this trait in `infra/storage/store.rs`.
 #[async_trait]
 pub trait PolicyStore: Send + Sync {
+    /// Resolve a `file`-scope retention rule's `scope_target_id` to a `File`
+    /// (needed to re-authorize per-file `WRITE` before create/delete). Mirrors
+    /// the identical method on `MultipartStore` — same underlying
+    /// `Store::require_file`/`FileRepo` lookup, exposed through this narrower
+    /// port too.
+    async fn require_file(&self, scope: &AccessScope, file_id: Uuid) -> Result<File, DomainError>;
+
     /// Fetch the raw policy for a given `(policy_scope, scope_owner_id)` within
     /// a tenant. Returns `None` when none is configured.
     async fn get_policy(
@@ -260,6 +281,15 @@ pub trait PolicyStore: Send + Sync {
         scope: &AccessScope,
         rule_id: Uuid,
     ) -> Result<bool, DomainError>;
+
+    /// Fetch a single retention rule by `rule_id`, if it exists. Used by
+    /// `delete_retention_rule` to re-authorize by scope/target before deleting
+    /// (a bare `rule_id` carries no ownership information on its own).
+    async fn get_retention_rule(
+        &self,
+        scope: &AccessScope,
+        rule_id: Uuid,
+    ) -> Result<Option<StoredRetentionRule>, DomainError>;
 }
 
 // ── DataPlanePort ─────────────────────────────────────────────────────────────

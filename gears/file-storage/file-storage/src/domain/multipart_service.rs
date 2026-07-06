@@ -393,6 +393,65 @@ impl MultipartService {
         })
     }
 
+    /// `POST /files/{file_id}/versions/{version_id}/multipart/{upload_id}/parts/{part_number}/report`:
+    /// token-authenticated callback used by the sidecar to record a
+    /// successfully-written part (P2 0.2 group B — the "report part" fix).
+    ///
+    /// Before this existed, nothing ever called
+    /// `MultipartStore::upsert_multipart_part` in a real deployment, so
+    /// `complete_multipart_upload`'s `list_multipart_parts` was always
+    /// structurally empty. `claims` has already been verified by the caller
+    /// (mirrors `finalize_version`'s handler-level token verification) and
+    /// `claims.op == Op::MultipartPart` has already been asserted there; this
+    /// method re-validates the claims against the session so a valid token for
+    /// a *different* (or no-longer-`in_progress`) session cannot poison
+    /// another upload's part list.
+    ///
+    /// @cpt-cf-file-storage-fr-multipart-upload
+    pub async fn report_part(
+        &self,
+        claims: &Claims,
+        backend_etag: String,
+        hash_value: Vec<u8>,
+        size: i64,
+    ) -> Result<(), DomainError> {
+        let upload_id = claims.multipart.upload_id;
+        let session = self
+            .store
+            .get_multipart_upload(upload_id)
+            .await?
+            .ok_or_else(|| DomainError::multipart_upload_not_found(upload_id))?;
+
+        // Bind the report to the exact (file_id, version_id) the token
+        // authorizes — a foreign session is reported as "not found" rather
+        // than distinguishable, mirroring `complete_multipart_upload`'s
+        // same-shaped guard.
+        if session.file_id != claims.file_id || session.version_id != claims.version_id {
+            return Err(DomainError::multipart_upload_not_found(upload_id));
+        }
+
+        if session.state != MultipartUploadState::InProgress {
+            return Err(DomainError::multipart_upload_not_in_progress(
+                upload_id,
+                session.state.as_str(),
+            ));
+        }
+
+        let part_number = i32::try_from(claims.multipart.part_number)
+            .map_err(|_| DomainError::validation("part_number", "part_number overflows i32"))?;
+
+        self.store
+            .upsert_multipart_part(
+                upload_id,
+                part_number,
+                &backend_etag,
+                hash_value,
+                size,
+                OffsetDateTime::now_utc(),
+            )
+            .await
+    }
+
     /// `POST /files/{id}/multipart/{upload_id}/complete`: finalize all parts.
     ///
     /// @cpt-cf-file-storage-fr-multipart-upload
@@ -429,6 +488,17 @@ impl MultipartService {
             return Err(DomainError::multipart_upload_not_in_progress(
                 upload_id,
                 session.state.as_str(),
+            ));
+        }
+
+        // Defence-in-depth (P2 0.3 step 3): the session may still read as
+        // `in_progress` here even though `expires_at` has already passed, if
+        // the background sweep has not yet ticked. Reject explicitly rather
+        // than racing ahead of the next sweep and finalizing content that
+        // should have been aborted.
+        if session.expires_at <= OffsetDateTime::now_utc() {
+            return Err(DomainError::multipart_upload_not_in_progress(
+                upload_id, "expired",
             ));
         }
 

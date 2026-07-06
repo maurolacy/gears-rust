@@ -103,7 +103,26 @@ impl FileService {
         let owner_kind_str = new.owner_kind.as_str().to_owned();
 
         // @cpt-cf-file-storage-fr-upload-idempotency
-        // Check for an existing idempotency record before doing any work.
+        // Authorize the write BEFORE consulting any stored idempotency
+        // record. The idempotency lookup used to run first and return early
+        // with a live signed upload URL — a caller whose WRITE grant was
+        // revoked (or was never authorized) could still replay a stored
+        // ticket. Every replay must now clear the caller's *current* grants,
+        // exactly like a fresh request would.
+        Self::validate_gts_type(&new.gts_file_type)?;
+        let _scope = self
+            .authorizer
+            .authorize(ctx, actions::WRITE, &new.gts_file_type, None)
+            .await?;
+
+        // @cpt-cf-file-storage-fr-upload-idempotency
+        // Now that the caller is authorized, consult the idempotency store.
+        // The stored record is bound to the subject that created it
+        // (`subject_id`); a caller can never surface another caller's ticket
+        // by reusing/guessing their `(owner_kind, owner_id, key)` tuple —
+        // a subject mismatch is treated as `Forbidden` rather than silently
+        // falling through to a fresh create (which would otherwise race the
+        // still-live row on insert).
         if let Some(ref key) = idempotency_key {
             let now = OffsetDateTime::now_utc();
             if let Some(record) = self
@@ -111,6 +130,9 @@ impl FileService {
                 .get_idempotency_key(tenant_id, &owner_kind_str, owner_id, key, now)
                 .await?
             {
+                if record.subject_id != ctx.subject_id() {
+                    return Err(DomainError::Forbidden);
+                }
                 let ticket: UploadTicket =
                     serde_json::from_str::<IdempotencyTicket>(&record.response_body)
                         .map(Into::into)
@@ -120,12 +142,6 @@ impl FileService {
                 return Ok(ticket);
             }
         }
-
-        Self::validate_gts_type(&new.gts_file_type)?;
-        let _scope = self
-            .authorizer
-            .authorize(ctx, actions::WRITE, &new.gts_file_type, None)
-            .await?;
 
         // @cpt-cf-file-storage-fr-allowed-types-policy
         // @cpt-cf-file-storage-fr-size-limits-policy
@@ -222,6 +238,7 @@ impl FileService {
                 owner_kind: owner_kind_str.clone(),
                 owner_id,
                 key: key.clone(),
+                subject_id: ctx.subject_id(),
                 response_status: 201,
                 response_body,
                 response_etag: String::new(),

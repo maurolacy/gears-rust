@@ -41,6 +41,11 @@ pub struct BackendCapabilities {
     pub presigned_url_internal: bool,
     /// Maximum blob size the backend accepts in bytes. `None` = unbounded.
     pub max_size_bytes: Option<u64>,
+    /// Whether content written to this backend survives process restarts /
+    /// crashes (e.g. `local-fs`, S3). `false` for volatile backends (e.g. the
+    /// in-memory dev/test backend) — `migrate_backend` gates moves onto a
+    /// non-durable backend behind an elevated authorization scope.
+    pub durable: bool,
 }
 
 /// A storage backend: moves immutable content blobs. All methods are keyed by an

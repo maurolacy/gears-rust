@@ -555,3 +555,65 @@ pub async fn finalize_version(
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
+
+/// Request body for the data-plane report-part endpoint.
+///
+/// The sidecar posts this after successfully writing a part's bytes to the
+/// backend (P2 0.2 group B — the "report part" callback).
+#[derive(Debug, serde::Deserialize)]
+pub struct ReportPartReq {
+    /// Backend-assigned `ETag` for this part (opaque, backend-specific).
+    pub backend_etag: String,
+    /// SHA-256 hash of the part's bytes, hex-encoded.
+    pub hash_hex: String,
+    /// Byte length of the part.
+    pub size: i64,
+}
+
+/// `POST /files/{file_id}/versions/{version_id}/multipart/{upload_id}/parts/{part_number}/report`
+///
+/// Token-authenticated (mirrors `finalize_version`): the request must carry
+/// the signed `multipart_part` upload token in the `x-fs-token` request
+/// header. Called by the sidecar immediately after a successful part write to
+/// record the part row that `complete_multipart_upload` assembles from.
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+pub async fn report_multipart_part(
+    Extension(msvc): MultiSvc,
+    Extension(verifier): Extension<Arc<Verifier>>,
+    Path((file_id, version_id, upload_id, part_number)): Path<(Uuid, Uuid, Uuid, u32)>,
+    headers: HeaderMap,
+    Json(req): Json<ReportPartReq>,
+) -> ApiResult<impl IntoResponse> {
+    // Extract the token from the x-fs-token header.
+    let token = headers
+        .get("x-fs-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .ok_or_else(|| DomainError::token_invalid("missing x-fs-token header"))?;
+
+    let claims = verifier
+        .verify(&token, OffsetDateTime::now_utc())
+        .map_err(|e| DomainError::token_invalid(e.to_string()))?;
+
+    // The token must authorize a report for exactly this
+    // (file_id, version_id, upload_id, part_number).
+    if claims.op != Op::MultipartPart
+        || claims.file_id != file_id
+        || claims.version_id != version_id
+        || claims.multipart.upload_id != upload_id
+        || claims.multipart.part_number != part_number
+    {
+        return Err(
+            DomainError::token_invalid("token does not authorize reporting this part").into(),
+        );
+    }
+
+    let hash_value = hex::decode(&req.hash_hex)
+        .map_err(|_| DomainError::validation("hash_hex", "must be valid hex-encoded SHA-256"))?;
+
+    msvc.report_part(&claims, req.backend_etag, hash_value, req.size)
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}

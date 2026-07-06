@@ -282,6 +282,111 @@ async fn finalize_with_control_plane(
     }
 }
 
+/// Build the report-part request body bytes (JSON `{backend_etag, hash_hex, size}`).
+///
+/// Returns an internal-error `Response` (boxed) if JSON serialization fails,
+/// which is only possible if `serde_json` itself has a bug (our value is trivial).
+#[allow(clippy::result_large_err)]
+fn report_part_body(backend_etag: &str, hash_hex: &str, size: i64) -> Result<Vec<u8>, Response> {
+    let body = serde_json::json!({
+        "backend_etag": backend_etag,
+        "hash_hex": hash_hex,
+        "size": size,
+    });
+    serde_json::to_vec(&body).map_err(|e| {
+        tracing::error!(error = %e, "failed to serialize report-part request body");
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+    })
+}
+
+/// Interpret the HTTP response from the control-plane report-part call.
+async fn interpret_report_part_response(
+    resp: reqwest::Response,
+    upload_id: Uuid,
+    part_number: u32,
+) -> Result<(), Response> {
+    if resp.status().is_success() {
+        tracing::debug!(%upload_id, part_number, "report-part callback succeeded");
+        return Ok(());
+    }
+    let status = resp.status();
+    let body_text = resp.text().await.unwrap_or_default();
+    tracing::error!(
+        %upload_id, part_number,
+        http_status = %status,
+        body = %body_text,
+        "control-plane report-part callback returned error"
+    );
+    Err((
+        StatusCode::BAD_GATEWAY,
+        format!("control-plane report-part failed ({status}): {body_text}"),
+    )
+        .into_response())
+}
+
+/// Call the control-plane report-part endpoint after a successful part write.
+///
+/// This is the sidecar half of the "report part" callback (P2 0.2 group B):
+/// without it, nothing ever populates `multipart_upload_parts`, so
+/// `complete_multipart_upload`'s `list_multipart_parts` is structurally empty
+/// in a real deployment. Mirrors `finalize_with_control_plane`'s contract:
+/// returns `Ok(())` when the control plane accepted the report, or
+/// `Err(Response)` with a `502 Bad Gateway` when the callback fails (the
+/// client should retry — the part write and this report are both idempotent
+/// per `(upload_id, part_number)`).
+///
+/// When `control_base_url` is empty, the callback is skipped (dev mode).
+#[allow(clippy::too_many_arguments)]
+async fn report_part_with_control_plane(
+    state: &SidecarState,
+    token: &str,
+    file_id: Uuid,
+    version_id: Uuid,
+    upload_id: Uuid,
+    part_number: u32,
+    backend_etag: &str,
+    hash_hex: &str,
+    size: i64,
+) -> Result<(), Response> {
+    if state.control_base_url.is_empty() {
+        return Ok(());
+    }
+
+    let url = format!(
+        "{}/api/file-storage/v1/files/{}/versions/{}/multipart/{}/parts/{}/report",
+        state.control_base_url.trim_end_matches('/'),
+        file_id,
+        version_id,
+        upload_id,
+        part_number,
+    );
+
+    let body_bytes = report_part_body(backend_etag, hash_hex, size)?;
+
+    match state
+        .http
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("x-fs-token", token)
+        .body(body_bytes)
+        .send()
+        .await
+    {
+        Ok(resp) => interpret_report_part_response(resp, upload_id, part_number).await,
+        Err(e) => {
+            tracing::error!(
+                %file_id, %version_id, %upload_id, part_number, error = %e,
+                "control-plane report-part callback failed"
+            );
+            Err((
+                StatusCode::BAD_GATEWAY,
+                format!("control-plane report-part callback unreachable: {e}"),
+            )
+                .into_response())
+        }
+    }
+}
+
 /// `PUT` multipart part: verify `op=multipart_part` token, enforce the exact
 /// `size` claim (FEATURE §4, point 2: reject `413` before writing any bytes),
 /// write the part via the backend, compute and return the part hash.
@@ -361,22 +466,38 @@ async fn upload_multipart_part(
     // only, no S3) we persist each part as a separate object keyed by path + part
     // and rely on `complete_multipart_upload` to assemble them.
     let part_path = format!("{}.part.{}", claims.backend_path, part_number);
-    match state.backend.put(&part_path, body).await {
-        Ok(()) => {
-            // Return the part hash and ETag so callers can track per-part integrity.
-            let body = serde_json::json!({
-                "part_number": part_number,
-                "etag": part_etag,
-                "hash_algorithm": "SHA-256",
-                "hash": part_etag,
-            });
-            (StatusCode::OK, axum::Json(body)).into_response()
-        }
-        Err(e) => {
-            tracing::error!(error = %e, part_number, "backend part write failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, "backend error").into_response()
-        }
+    if let Err(e) = state.backend.put(&part_path, body).await {
+        tracing::error!(error = %e, part_number, "backend part write failed");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "backend error").into_response();
     }
+
+    // Report-part callback: notify the control plane that this part's bytes
+    // have landed so it can record the part row `complete_multipart_upload`
+    // assembles from (P2 0.2 group B — the "report part" fix).
+    if let Err(resp) = report_part_with_control_plane(
+        &state,
+        &token,
+        file_id,
+        version_id,
+        claims.multipart.upload_id,
+        part_number,
+        &part_etag,
+        &part_etag,
+        i64::try_from(body_len).unwrap_or(i64::MAX),
+    )
+    .await
+    {
+        return resp;
+    }
+
+    // Return the part hash and ETag so callers can track per-part integrity.
+    let body = serde_json::json!({
+        "part_number": part_number,
+        "etag": part_etag,
+        "hash_algorithm": "SHA-256",
+        "hash": part_etag,
+    });
+    (StatusCode::OK, axum::Json(body)).into_response()
 }
 
 /// `GET` download: verify token (op=GET), stream bytes, honour `Range`.

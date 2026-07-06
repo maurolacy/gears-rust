@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use sea_orm_migration::MigratorTrait;
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
@@ -200,7 +201,7 @@ async fn create_file_with_disallowed_mime_is_rejected() {
 
 #[tokio::test]
 async fn finalize_oversized_upload_is_rejected() {
-    let (svc, psvc, _dp) = build_service(None).await;
+    let (svc, psvc, dp) = build_service(None).await;
     let ctx = ctx(Uuid::now_v7());
     let owner = Uuid::now_v7();
 
@@ -241,10 +242,19 @@ async fn finalize_oversized_upload_is_rejected() {
         "got {err:?}"
     );
 
-    // A 5-byte finalize is within the ceiling.
-    svc.finalize_upload(&ctx, t.file_id, t.version_id, 5, vec![0u8; 32])
-        .await
-        .expect("5 bytes within 10-byte cap");
+    // A 5-byte finalize is within the ceiling. `finalize_upload` now
+    // re-verifies the claimed size/hash against the real backend blob, so the
+    // 5 bytes must actually be written first (`dp.put_content` does the
+    // backend `put` + `finalize_upload` in one call, matching production).
+    dp.put_content(
+        &ctx,
+        t.file_id,
+        t.version_id,
+        "text/plain",
+        Bytes::from_static(b"hello"),
+    )
+    .await
+    .expect("5 bytes within 10-byte cap");
 }
 
 #[tokio::test]
@@ -456,7 +466,7 @@ async fn quota_client_error_fails_closed() {
 
 #[tokio::test]
 async fn no_policy_and_no_quota_is_fully_permissive() {
-    let (svc, _psvc, _dp) = build_service(None).await;
+    let (svc, _psvc, dp) = build_service(None).await;
     let ctx = ctx(Uuid::now_v7());
 
     // Any mime, any size finalize, any metadata — all accepted.
@@ -472,7 +482,13 @@ async fn no_policy_and_no_quota_is_fully_permissive() {
         .await
         .expect("permissive create");
 
-    svc.finalize_upload(&ctx, t.file_id, t.version_id, 10_000_000, vec![0u8; 32])
+    // `finalize_upload` now re-verifies the claimed size/hash against the
+    // real backend blob, so the large upload must actually be written first
+    // (`dp.put_content` does the backend `put` + `finalize_upload` in one
+    // call, matching production) — the policy-permissiveness assertion is
+    // that no size cap rejects a 10MB upload absent a configured policy.
+    let big = Bytes::from(vec![0u8; 10_000_000]);
+    dp.put_content(&ctx, t.file_id, t.version_id, "application/x-anything", big)
         .await
         .expect("no size limit without policy");
 }

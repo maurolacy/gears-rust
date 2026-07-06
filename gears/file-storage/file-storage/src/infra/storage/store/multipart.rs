@@ -85,6 +85,20 @@ impl Store {
             .await
     }
 
+    /// Force-set a session's `expires_at`. Test-support only -- see
+    /// `MultipartRepo::set_expires_at` for why this exists.
+    pub async fn set_multipart_expires_at_for_test(
+        &self,
+        upload_id: Uuid,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), DomainError> {
+        let conn = self.db.conn().map_err(db_err)?;
+        self.repos
+            .multipart
+            .set_expires_at(&conn, upload_id, expires_at)
+            .await
+    }
+
     /// List all parts for a multipart upload.
     ///
     /// @cpt-cf-file-storage-fr-multipart-upload

@@ -284,6 +284,7 @@ impl Store {
                                 &idem.owner_kind,
                                 idem.owner_id,
                                 &idem.key,
+                                idem.subject_id,
                                 file_id,
                                 idem.response_status,
                                 &idem.response_body,

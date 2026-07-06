@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
-use file_storage_sdk::{File, FileVersion};
+use file_storage_sdk::{File, FileVersion, VersionStatus};
 
 use crate::domain::audit::{AuditEntry, FileEvent};
 use crate::domain::error::DomainError;
@@ -139,6 +139,48 @@ impl Store {
                 Box::pin(async move {
                     let removed = versions
                         .delete(tx, &AccessScope::allow_all(), file_id, version_id)
+                        .await?;
+                    if removed {
+                        // @cpt-cf-file-storage-nfr-audit-completeness
+                        audit_repo.insert(tx, &audit).await?;
+                    }
+                    Ok::<bool, DomainError>(removed)
+                })
+            })
+            .await
+    }
+
+    /// Delete a single version row iff it is still `pending`, recording an
+    /// audit row in the same transaction. Returns `true` if a row was removed.
+    ///
+    /// Status-guarded CAS (P2 0.3 step 5) -- used by the cleanup sweep instead
+    /// of the unconditional [`Self::delete_version`] when reclaiming an
+    /// expired multipart session's pending version row, so a version that a
+    /// racing `complete_multipart_upload` has already flipped to `available`
+    /// is never deleted.
+    ///
+    /// @cpt-cf-file-storage-fr-audit-trail
+    /// @cpt-cf-file-storage-nfr-audit-completeness
+    pub async fn delete_pending_version(
+        &self,
+        file_id: Uuid,
+        version_id: Uuid,
+        audit: AuditEntry,
+    ) -> Result<bool, DomainError> {
+        let versions = self.repos.versions.clone();
+        let audit_repo = self.repos.audit.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    let removed = versions
+                        .delete_if_status(
+                            tx,
+                            &AccessScope::allow_all(),
+                            file_id,
+                            version_id,
+                            VersionStatus::Pending,
+                        )
                         .await?;
                     if removed {
                         // @cpt-cf-file-storage-nfr-audit-completeness

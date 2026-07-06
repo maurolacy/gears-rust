@@ -55,6 +55,10 @@ This feature supersedes the interim P2-M3 client-driven implementation in which 
 
 **Principles**: `cpt-cf-file-storage-principle-control-no-content`, `cpt-cf-file-storage-principle-signed-urls`
 
+> **Caveat (P2 0.2 — current backend support)**: `LocalFsBackend.multipart_native == false` (it advertises `range_native: true` only), so today `POST /files/{id}/multipart` returns `422 multipart_not_supported` against the real default topology (`local-fs` as the default backend). Multipart uploads only work when a `multipart_native` backend is configured as the default: today that means the non-durable `InMemoryBackend` (dev/test only — see item 0.5), and going forward the S3 backend (Tier 1 item 1.7). A true offset-write `LocalFsBackend` implementation is intentionally deferred until 1.7, since it requires widening `StorageBackend::upload_part` to carry `offset`/`part_size` — the same trait-signature change 1.7.4 (S3 streaming) already plans to make.
+
+
+
 ### 1.3 Actors
 
 | Actor | Role in Feature |

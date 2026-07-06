@@ -22,6 +22,13 @@ pub struct Model {
     pub owner_id: Uuid,
     #[sea_orm(primary_key, auto_increment = false)]
     pub idempotency_key: String,
+    /// The authenticated subject (`ctx.subject_id()`) that created this
+    /// record. Not part of the primary key — the domain layer fetches by the
+    /// existing composite key and then verifies this column matches the
+    /// replaying caller, treating a mismatch as `Forbidden` (P2 remediation
+    /// 0.10: a caller must never be able to surface another caller's ticket
+    /// by reusing/guessing their `(owner_kind, owner_id, key)` tuple).
+    pub subject_id: Uuid,
     pub file_id: Uuid,
     pub response_status: i32,
     #[sea_orm(column_type = "Text")]

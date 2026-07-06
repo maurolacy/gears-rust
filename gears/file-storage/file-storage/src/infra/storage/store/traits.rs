@@ -32,6 +32,15 @@ impl CleanupStore for Store {
         Store::delete_version(self, file_id, version_id, audit).await
     }
 
+    async fn delete_pending_version(
+        &self,
+        file_id: Uuid,
+        version_id: Uuid,
+        audit: crate::domain::audit::AuditEntry,
+    ) -> Result<bool, DomainError> {
+        Store::delete_pending_version(self, file_id, version_id, audit).await
+    }
+
     async fn list_expired_multipart_uploads(
         &self,
         now: OffsetDateTime,
@@ -238,6 +247,14 @@ impl MultipartStore for Store {
 
 #[async_trait]
 impl crate::domain::ports::PolicyStore for Store {
+    async fn require_file(
+        &self,
+        scope: &toolkit_security::AccessScope,
+        file_id: Uuid,
+    ) -> Result<File, DomainError> {
+        Store::require_file(self, scope, file_id).await
+    }
+
     async fn get_policy(
         &self,
         scope: &toolkit_security::AccessScope,
@@ -304,5 +321,13 @@ impl crate::domain::ports::PolicyStore for Store {
         rule_id: Uuid,
     ) -> Result<bool, DomainError> {
         Store::delete_retention_rule(self, scope, rule_id).await
+    }
+
+    async fn get_retention_rule(
+        &self,
+        scope: &toolkit_security::AccessScope,
+        rule_id: Uuid,
+    ) -> Result<Option<crate::domain::policy::StoredRetentionRule>, DomainError> {
+        Store::get_retention_rule(self, scope, rule_id).await
     }
 }

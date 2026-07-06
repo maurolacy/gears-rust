@@ -72,6 +72,7 @@ impl IdempotencyRepo {
         owner_kind: &str,
         owner_id: Uuid,
         key: &str,
+        subject_id: Uuid,
         file_id: Uuid,
         response_status: i32,
         response_body: &str,
@@ -104,6 +105,7 @@ impl IdempotencyRepo {
             owner_kind: Set(owner_kind.to_owned()),
             owner_id: Set(owner_id),
             idempotency_key: Set(key.to_owned()),
+            subject_id: Set(subject_id),
             file_id: Set(file_id),
             response_status: Set(response_status),
             response_body: Set(response_body.to_owned()),
@@ -121,6 +123,7 @@ impl IdempotencyRepo {
 fn record_from_model(m: Model) -> IdempotencyRecord {
     IdempotencyRecord {
         file_id: m.file_id,
+        subject_id: m.subject_id,
         response_status: u16::try_from(m.response_status).unwrap_or(201),
         response_body: m.response_body,
         response_etag: m.response_etag,

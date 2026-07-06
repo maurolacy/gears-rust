@@ -115,6 +115,36 @@ impl MultipartRepo {
         Ok(res.rows_affected > 0)
     }
 
+    /// Force-set a session's `expires_at`, unconditionally.
+    ///
+    /// Test-support only: production code never mutates `expires_at` after a
+    /// session is created. This exists so unit tests can deterministically
+    /// simulate "time passing" on an already-created (possibly
+    /// already-completed) session without a real sleep or concurrency, per
+    /// the unit-testing doctrine (P2 0.3 --
+    /// `sweep_after_complete_wins_does_not_delete_bound_version` in
+    /// `cleanup_test.rs` backdates a session's `expires_at` *after* a
+    /// successful `complete_multipart_upload`, which the P2 0.3 step-3
+    /// defense-in-depth check would otherwise reject if the session were
+    /// built with a past `expires_at` from the start).
+    pub async fn set_expires_at<C: DBRunner>(
+        &self,
+        conn: &C,
+        upload_id: Uuid,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), DomainError> {
+        use sea_orm::sea_query::Expr;
+        UploadEntity::update_many()
+            .col_expr(UploadColumn::ExpiresAt, Expr::value(expires_at))
+            .filter(UploadColumn::UploadId.eq(upload_id))
+            .secure()
+            .scope_with(&AccessScope::allow_all())
+            .exec(conn)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// Insert or replace a multipart upload part. If `part_number` already exists,
     /// replace it (idempotent re-upload of a part).
     #[allow(clippy::too_many_arguments)]

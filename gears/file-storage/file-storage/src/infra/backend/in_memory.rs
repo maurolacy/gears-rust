@@ -59,6 +59,10 @@ impl StorageBackend for InMemoryBackend {
         BackendCapabilities {
             multipart_native: true,
             range_native: false,
+            // Intentionally left on the `BackendCapabilities::default()`
+            // value of `false`: content lives only in process memory and is
+            // lost on restart/crash, so `migrate_backend` must treat this as
+            // non-durable.
             ..BackendCapabilities::default()
         }
     }

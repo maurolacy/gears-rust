@@ -83,6 +83,15 @@ pub struct FileStorageConfig {
     /// @cpt-cf-file-storage-fr-retention-policies
     #[serde(default = "default_enable_background_sweep")]
     pub enable_background_sweep: bool,
+
+    /// When `true`, an additional non-durable `memory` backend is registered
+    /// alongside the default `local-fs` backend. **Must be `false` by
+    /// default** — the in-memory backend loses all content on restart, so it
+    /// must be an explicit dev/test opt-in rather than always present.
+    ///
+    /// @cpt-cf-file-storage-fr-backend-config-source
+    #[serde(default)]
+    pub enable_in_memory_backend: bool,
 }
 
 impl FileStorageConfig {
@@ -118,6 +127,7 @@ impl fmt::Debug for FileStorageConfig {
             .field("orphan_grace_secs", &self.orphan_grace_secs)
             .field("sweep_interval_secs", &self.sweep_interval_secs)
             .field("enable_background_sweep", &self.enable_background_sweep)
+            .field("enable_in_memory_backend", &self.enable_in_memory_backend)
             // Never print the signing key — only whether one is configured.
             .field(
                 "signing_key_seed",
@@ -141,6 +151,7 @@ impl Default for FileStorageConfig {
             orphan_grace_secs: default_orphan_grace_secs(),
             sweep_interval_secs: default_sweep_interval_secs(),
             enable_background_sweep: default_enable_background_sweep(),
+            enable_in_memory_backend: false,
         }
     }
 }

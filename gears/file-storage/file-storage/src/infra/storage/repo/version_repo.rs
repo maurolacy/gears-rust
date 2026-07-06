@@ -100,7 +100,8 @@ impl VersionRepo {
             .filter(
                 Condition::all()
                     .add(Column::FileId.eq(file_id))
-                    .add(Column::VersionId.eq(version_id)),
+                    .add(Column::VersionId.eq(version_id))
+                    .add(Column::Status.eq(VersionStatus::Pending.as_str())),
             )
             .secure()
             .scope_with(scope)
@@ -133,7 +134,8 @@ impl VersionRepo {
             .filter(
                 Condition::all()
                     .add(Column::FileId.eq(file_id))
-                    .add(Column::VersionId.eq(version_id)),
+                    .add(Column::VersionId.eq(version_id))
+                    .add(Column::Status.eq(VersionStatus::Pending.as_str())),
             )
             .secure()
             .scope_with(scope)
@@ -202,6 +204,38 @@ impl VersionRepo {
                 Condition::all()
                     .add(Column::FileId.eq(file_id))
                     .add(Column::VersionId.eq(version_id)),
+            )
+            .secure()
+            .scope_with(scope)
+            .exec(conn)
+            .await
+            .map_err(db_err)?;
+        Ok(res.rows_affected > 0)
+    }
+
+    /// Delete a single version row iff its current `status` matches `expected`.
+    /// Returns `true` if a row was removed, `false` if the row is missing or
+    /// its status no longer matches (a concurrent writer already moved it on).
+    ///
+    /// Status-guarded delete CAS -- same `Condition::all()` pattern as
+    /// [`Self::finalize`]'s pending-only guard (P2 0.4). Used by the cleanup
+    /// sweep (P2 0.3 step 5) so a pending version that a racing
+    /// `complete_multipart_upload` has already flipped to `available` can
+    /// never be deleted out from under it.
+    pub async fn delete_if_status<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        file_id: Uuid,
+        version_id: Uuid,
+        expected: VersionStatus,
+    ) -> Result<bool, DomainError> {
+        let res = Entity::delete_many()
+            .filter(
+                Condition::all()
+                    .add(Column::FileId.eq(file_id))
+                    .add(Column::VersionId.eq(version_id))
+                    .add(Column::Status.eq(expected.as_str())),
             )
             .secure()
             .scope_with(scope)

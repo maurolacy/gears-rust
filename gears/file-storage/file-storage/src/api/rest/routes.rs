@@ -66,6 +66,34 @@ pub(crate) fn register_routes(
     .error_500(openapi)
     .register(router, openapi);
 
+    // ── Data-plane report-part (s2s, token-authenticated) ───────────────────
+    // Same trust model as finalize above: the signed `multipart_part` token is
+    // the sole authorization, no user JWT required (P2 0.2 group B — the
+    // "report part" callback that closes the structural gap where nothing
+    // ever populated `multipart_upload_parts` in a real deployment).
+    router = OperationBuilder::post(format!(
+        "{BASE}/files/{{file_id}}/versions/{{version_id}}/multipart/{{upload_id}}/parts/{{part_number}}/report"
+    ))
+    .operation_id("file_storage.report_multipart_part")
+    .public()
+    .summary("Report a successfully-written multipart part (token-authenticated, sidecar s2s callback)")
+    .description(
+        "Called by the sidecar after a successful part write to record the part's backend \
+         ETag, hash, and size so `complete` can assemble from real reported parts. \
+         Authorized by the signed upload token (fs-token) \u{2014} no user JWT required.",
+    )
+    .tag(API_TAG)
+    .path_param("file_id", "File UUID")
+    .path_param("version_id", "Version UUID")
+    .path_param("upload_id", "Upload session UUID")
+    .path_param("part_number", "1-based part number")
+    .handler(handlers::report_multipart_part)
+    .json_response(StatusCode::NO_CONTENT, "Part reported")
+    .error_403(openapi)
+    .error_404(openapi)
+    .error_500(openapi)
+    .register(router, openapi);
+
     // POST /files — create + presign upload
     router = OperationBuilder::post(format!("{BASE}/files"))
         .operation_id("file_storage.create_file")

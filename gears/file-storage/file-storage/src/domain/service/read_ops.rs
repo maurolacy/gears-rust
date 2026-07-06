@@ -55,6 +55,21 @@ impl FileService {
         self.authorizer
             .authorize(ctx, actions::READ, "", None)
             .await?;
+        // Ownership gate: the coarse READ check above is resource-less (see
+        // module docs) — it only answers "may this subject read files at
+        // all," not "whose files." `owner` is attacker-controlled (built from
+        // the request query), so without this gate any tenant member could
+        // enumerate another subject's file listing via
+        // `?owner_kind=user&owner_id=<victim>`. A caller listing their own
+        // files (`owner.owner_id == ctx.subject_id()`, whether `owner_kind`
+        // is `user` or another kind the caller itself holds) proceeds
+        // unconditionally; any other owner requires `ADMIN_POLICY` — on
+        // `Forbidden` this propagates via `?` instead of listing.
+        if owner.owner_id != ctx.subject_id() {
+            self.authorizer
+                .authorize(ctx, actions::ADMIN_POLICY, "", None)
+                .await?;
+        }
         let limit = limit
             .unwrap_or(self.cfg.default_page_size)
             .min(self.cfg.max_page_size);
@@ -273,6 +288,9 @@ impl FileService {
 
         let all = self.store.list_versions(file_id).await?;
         if all.len() <= 1 {
+            if !all.iter().any(|v| v.version_id == version_id) {
+                return Err(DomainError::version_not_found(file_id, version_id));
+            }
             // Last version → delete the whole file. Authorization has already been
             // checked above; skip the If-Match gate (delete_version has its own
             // contract — no If-Match on DELETE /files/{id}/versions/{vid}).

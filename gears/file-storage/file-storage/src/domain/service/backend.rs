@@ -68,6 +68,21 @@ impl FileService {
         let source = self.backends.get(&version.backend_id)?;
         let dest = self.backends.get(target_backend_id)?;
 
+        // Migrating content onto a non-durable backend (e.g. a dev/test
+        // `memory` backend) risks silent data loss on the next restart. An
+        // ordinary WRITE-authorized caller may not do this implicitly — it
+        // requires the elevated admin-policy scope.
+        if !dest.capabilities().durable {
+            self.authorizer
+                .authorize(
+                    ctx,
+                    actions::ADMIN_POLICY,
+                    &file.gts_file_type,
+                    Some(file_id),
+                )
+                .await?;
+        }
+
         // Read the blob from the source backend.
         let bytes = source.get(&version.backend_path).await?;
 

@@ -344,6 +344,106 @@ async fn multipart_happy_path_in_memory() {
     assert_eq!(content, Bytes::from_static(b"Hello, World!"));
 }
 
+// -- 1c. Completing an already-completed session is rejected ------------------
+
+/// A second `complete_multipart_upload` call for the same `upload_id`, after
+/// the first call already finalized the version and flipped the session to
+/// `completed`, must be rejected — not silently re-accepted or allowed to
+/// re-finalize the version.
+///
+/// This is the session-level guard (`MultipartUploadNotInProgress`), which
+/// sits in front of the P2 0.4 version-level CAS guard in
+/// `VersionRepo::finalize`: this test confirms the session-level guard alone
+/// already rejects the replay here, so the version-level guard is
+/// defense-in-depth behind it, not the only line of defense.
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn multipart_complete_after_already_finalized_is_rejected() {
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let multipart_store: Arc<dyn MultipartStore> = Arc::new(store.clone());
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::clone(&multipart_store),
+        backends,
+        Arc::clone(&authorizer),
+        None,
+        issuer,
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+    let ctx = ctx(Uuid::now_v7());
+
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+    let declared_size = 13u64;
+    let plan = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            declared_size,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let session = multipart_store
+        .get_multipart_upload(plan.upload_id)
+        .await
+        .unwrap()
+        .expect("session must exist");
+    let backend_path = format!("/{}/{}", ticket.file_id, plan.version_id);
+    simulate_sidecar_put_part(
+        &multipart_store,
+        &backend,
+        &plan,
+        &backend_path,
+        &session.backend_upload_handle,
+        1,
+        Bytes::from_static(b"Hello, World!"),
+    )
+    .await;
+
+    // First complete: succeeds, finalizes the version, flips the session to
+    // `completed`.
+    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+        .await
+        .unwrap();
+
+    // Second complete for the same upload_id: the session is no longer
+    // `in_progress`, so this must be rejected before ever touching the
+    // version-level CAS.
+    let err = msvc
+        .complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::MultipartUploadNotInProgress { .. }),
+        "expected MultipartUploadNotInProgress, got {err:?}"
+    );
+}
+
 // -- 1b. Full lifecycle: create -> multipart upload -> bind -> delete ---------
 
 /// A multipart-uploaded file must be fully removable end to end: create it,
@@ -878,5 +978,375 @@ async fn initiate_plan_urls_carry_valid_multipart_tokens() {
             "size claim must match plan for part {}",
             p.part_number
         );
+    }
+}
+
+// -- 9. Real default topology: rejected until a multipart_native backend ----
+// is configured as the default (P2 0.2 structural fix group A) --------------
+
+/// Locks in TODAY's real behavior against the *actual* default backend
+/// topology `gear.rs`/`build_backend_registry` wires up: `local-fs` is always
+/// present and the default; the non-durable `memory` backend only joins when
+/// `FileStorageConfig::enable_in_memory_backend` is set, which defaults to
+/// `false` (P2 0.5). `LocalFsBackend.multipart_native == false`
+/// (`docs/features/multipart-coordinator.md`'s new caveat), so initiate must
+/// be rejected against the real default config.
+///
+/// This deliberately does NOT reuse `gear.rs::build_backend_registry` (a
+/// private fn, unreachable from an external integration-test crate) --
+/// instead it mirrors its logic verbatim and asserts the flag it branches on
+/// is still `false` by default, so a silent flip of either the default or the
+/// backend's capability is caught here rather than only in production.
+///
+/// Flip the assertion once a real default-topology backend sets
+/// `multipart_native: true` (S3, item 1.7).
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn multipart_initiate_against_real_default_topology_is_rejected_until_backend_supports_it() {
+    use file_storage::config::FileStorageConfig;
+
+    let db = build_db().await;
+    let cfg = FileStorageConfig::default();
+    assert!(
+        !cfg.enable_in_memory_backend,
+        "this test locks in the REAL default topology (local-fs only); if this \
+         default flips, the doc caveat in multipart-coordinator.md and this test \
+         both need updating"
+    );
+
+    // Mirror `gear.rs::build_backend_registry` exactly.
+    let mut backend_list: Vec<Arc<dyn StorageBackend>> =
+        vec![Arc::new(LocalFsBackend::new("local-fs", &cfg.storage_root))];
+    if cfg.enable_in_memory_backend {
+        backend_list.push(Arc::new(InMemoryBackend::new("memory")));
+    }
+    let backends = BackendRegistry::new(backend_list, "local-fs").expect("registry");
+
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let svc_cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        svc_cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::new(store) as Arc<dyn MultipartStore>,
+        backends,
+        authorizer,
+        None,
+        issuer,
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    let err = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            1024,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::MultipartNotSupported { .. }),
+        "expected MultipartNotSupported against the real default topology, got {err:?}"
+    );
+}
+
+// -- 10. Report-part callback: complete assembles from REPORTED parts, ------
+// not a structurally empty list (P2 0.2 structural fix group B) -------------
+
+/// Drives the sidecar's new report-part callback end to end, in-process:
+/// initiate -> for each planned part, call `handlers::report_multipart_part`
+/// through a minimal real `axum::Router` (a route-registration smoke check
+/// for the new route, exercising token verification + JSON decoding +
+/// `MultipartService::report_part` for real) -> `complete_multipart_upload`.
+///
+/// Before P2 0.2 group B, nothing ever called
+/// `MultipartStore::upsert_multipart_part` in a real deployment, so
+/// `complete_multipart_upload`'s `list_multipart_parts` was always
+/// structurally empty. This test asserts the DB state directly via the
+/// `multipart_upload_part` entity -- NOT via `list_multipart_parts`, which is
+/// the very method under test and would make the assertion tautological.
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn multipart_complete_uses_reported_parts_not_empty_list() {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use sea_orm::EntityTrait;
+    use toolkit_db::secure::SecureEntityExt;
+    use toolkit_security::AccessScope;
+    use tower::ServiceExt;
+
+    use file_storage::api::rest::handlers;
+    use file_storage::domain::multipart::DEFAULT_MIN_PART_SIZE;
+    use file_storage::infra::signed_url::Verifier;
+    use file_storage::infra::storage::entity::multipart_upload_part;
+
+    let db = build_db().await;
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![Arc::clone(&backend)], "mem").expect("registry");
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let verifier: Arc<Verifier> = Arc::new(issuer.verifier());
+    let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+        Arc::new(TenantOnlyAuthorizer);
+    let cfg = ServiceConfig {
+        default_url_ttl_secs: 3600,
+        sidecar_base_url: "http://sidecar.test".to_owned(),
+        default_page_size: 50,
+        max_page_size: 1000,
+        idempotency_ttl_secs: 86400,
+    };
+    let store = Store::new(Arc::clone(&db));
+    let svc = Arc::new(FileService::new(
+        store.clone(),
+        backends.clone(),
+        Arc::clone(&issuer),
+        Arc::clone(&authorizer),
+        cfg,
+        None,
+        None,
+    ));
+    let msvc = Arc::new(MultipartService::new(
+        Arc::new(store.clone()) as Arc<dyn MultipartStore>,
+        backends,
+        authorizer,
+        None,
+        Arc::clone(&issuer),
+        "http://sidecar.test".to_owned(),
+        3600,
+    ));
+
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+    // Force a multi-part plan: `preferred_part_size` is floored to
+    // `DEFAULT_MIN_PART_SIZE` (`compute_plan`), so declaring just over 2x that
+    // floor plans exactly 3 parts: [min, min, 3]. No real bytes are ever
+    // written to the backend in this test (only the report-part metadata
+    // callback is exercised), so a large declared_size costs nothing.
+    let declared_size = 2 * DEFAULT_MIN_PART_SIZE + 3;
+    let plan = msvc
+        .initiate_multipart_upload(
+            &ctx,
+            ticket.file_id,
+            "application/octet-stream",
+            declared_size,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        plan.parts.len(),
+        3,
+        "declared_size = 2*min + 3 must plan exactly 3 parts"
+    );
+
+    // A minimal real router carrying only the report-part route + its two
+    // extensions -- exercises `handlers::report_multipart_part` (token
+    // verification, path-param binding, JSON decoding) for real, not just
+    // the domain method.
+    let router = Router::new()
+        .route(
+            "/api/file-storage/v1/files/{file_id}/versions/{version_id}/multipart/{upload_id}/parts/{part_number}/report",
+            post(handlers::report_multipart_part),
+        )
+        .layer(axum::Extension(Arc::clone(&verifier)))
+        .layer(axum::Extension(Arc::clone(&msvc)));
+
+    let mut expected_total: i64 = 0;
+    for part in &plan.parts {
+        let token_start =
+            part.upload_url.find("fs-token=").expect("fs-token in URL") + "fs-token=".len();
+        let token = &part.upload_url[token_start..];
+
+        let size = i64::try_from(part.size).unwrap();
+        expected_total += size;
+        let body = serde_json::json!({
+            "backend_etag": format!("etag-{}", part.part_number),
+            "hash_hex": hex::encode([u8::try_from(part.part_number % 256).unwrap(); 32]),
+            "size": size,
+        });
+
+        let uri = format!(
+            "/api/file-storage/v1/files/{}/versions/{}/multipart/{}/parts/{}/report",
+            ticket.file_id, plan.version_id, plan.upload_id, part.part_number
+        );
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-fs-token", token)
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = router.clone().oneshot(req).await.expect("router dispatch");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "report_multipart_part must succeed for part {}",
+            part.part_number
+        );
+    }
+
+    // Complete: must assemble from the REPORTED parts, not a structurally
+    // empty list.
+    msvc.complete_multipart_upload(&ctx, ticket.file_id, plan.upload_id)
+        .await
+        .unwrap();
+
+    // Assert the DB state directly via the entity, NOT via
+    // `list_multipart_parts` -- the very method under test.
+    let conn = db.conn().expect("conn");
+    let rows = multipart_upload_part::Entity::find()
+        .secure()
+        .scope_with(&AccessScope::allow_all())
+        .all(&conn)
+        .await
+        .expect("query multipart_upload_parts directly");
+    assert_eq!(
+        rows.len(),
+        plan.parts.len(),
+        "multipart_upload_parts must have exactly one row per reported part"
+    );
+    let db_total: i64 = rows.iter().map(|r| r.size).sum();
+    assert_eq!(db_total, expected_total);
+
+    let version = store
+        .get_version(ticket.file_id, plan.version_id)
+        .await
+        .unwrap()
+        .expect("version row must exist");
+    assert_eq!(
+        version.size, db_total,
+        "completed version size must equal the sum of reported part sizes"
+    );
+}
+
+// -- 11. Table-driven: multipart accept/reject tracks backend capability ----
+
+/// Table-driven per P2 0.2: a `local-fs`-only registry rejects initiate
+/// (`multipart_native == false`); a `memory`-only registry accepts it
+/// (`multipart_native == true`). Complements the single-case
+/// `multipart_rejected_on_local_fs` / `multipart_happy_path_in_memory` tests
+/// by pinning both sides of the same capability gate in one place.
+///
+/// @cpt-cf-file-storage-fr-multipart-upload
+#[tokio::test]
+async fn multipart_initiate_rejected_when_backend_not_multipart_native() {
+    struct Case {
+        name: &'static str,
+        backend: fn() -> Arc<dyn StorageBackend>,
+        backend_id: &'static str,
+        expect_multipart_supported: bool,
+    }
+
+    let cases = [
+        Case {
+            name: "local-fs-only registry",
+            backend: || {
+                let tmp =
+                    std::env::temp_dir().join(format!("cf-fs-mpn-{}", Uuid::now_v7().simple()));
+                std::fs::create_dir_all(&tmp).expect("create tmp dir");
+                Arc::new(LocalFsBackend::new("local-fs", tmp)) as Arc<dyn StorageBackend>
+            },
+            backend_id: "local-fs",
+            expect_multipart_supported: false,
+        },
+        Case {
+            name: "memory-only registry",
+            backend: || Arc::new(InMemoryBackend::new("memory")) as Arc<dyn StorageBackend>,
+            backend_id: "memory",
+            expect_multipart_supported: true,
+        },
+    ];
+
+    for case in cases {
+        let db = build_db().await;
+        let backend = (case.backend)();
+        let backends = BackendRegistry::new(vec![backend], case.backend_id).expect("registry");
+        let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+        let authorizer: Arc<dyn file_storage::domain::authz::Authorizer> =
+            Arc::new(TenantOnlyAuthorizer);
+        let cfg = ServiceConfig {
+            default_url_ttl_secs: 3600,
+            sidecar_base_url: "http://sidecar.test".to_owned(),
+            default_page_size: 50,
+            max_page_size: 1000,
+            idempotency_ttl_secs: 86400,
+        };
+        let store = Store::new(Arc::clone(&db));
+        let svc = Arc::new(FileService::new(
+            store.clone(),
+            backends.clone(),
+            Arc::clone(&issuer),
+            Arc::clone(&authorizer),
+            cfg,
+            None,
+            None,
+        ));
+        let msvc = Arc::new(MultipartService::new(
+            Arc::new(store) as Arc<dyn MultipartStore>,
+            backends,
+            authorizer,
+            None,
+            issuer,
+            "http://sidecar.test".to_owned(),
+            3600,
+        ));
+
+        let ctx = ctx(Uuid::now_v7());
+        let ticket = svc.create_file(&ctx, new_file(), None).await.unwrap();
+
+        let result = msvc
+            .initiate_multipart_upload(
+                &ctx,
+                ticket.file_id,
+                "application/octet-stream",
+                1024,
+                None,
+                None,
+            )
+            .await;
+
+        if case.expect_multipart_supported {
+            assert!(
+                result.is_ok(),
+                "case '{}': expected multipart to be accepted, got {:?}",
+                case.name,
+                result.err()
+            );
+        } else {
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, DomainError::MultipartNotSupported { .. }),
+                "case '{}': expected MultipartNotSupported, got {err:?}",
+                case.name
+            );
+        }
     }
 }

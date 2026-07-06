@@ -89,6 +89,10 @@ pub struct IdempotencyInsert {
     pub owner_kind: String,
     pub owner_id: Uuid,
     pub key: String,
+    /// The authenticated subject (`ctx.subject_id()`) creating this record —
+    /// verified against on replay so one caller's key can never surface
+    /// another caller's ticket (P2 remediation 0.10).
+    pub subject_id: Uuid,
     pub response_status: i32,
     pub response_body: String,
     pub response_etag: String,

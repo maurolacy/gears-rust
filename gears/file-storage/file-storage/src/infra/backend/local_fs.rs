@@ -61,6 +61,8 @@ impl StorageBackend for LocalFsBackend {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             range_native: true,
+            // Local filesystem writes survive process restarts.
+            durable: true,
             ..BackendCapabilities::default()
         }
     }

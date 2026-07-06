@@ -217,14 +217,20 @@ impl CleanupEngine {
         count
     }
 
-    /// Abort one expired multipart session: tell the backend to drop the
-    /// in-progress upload, delete the pending version row, and mark the session
-    /// as aborted.
+    /// Abort one expired multipart session: win the session's own
+    /// `in_progress -> aborted` CAS *first*, and only on success clean up the
+    /// backend upload handle and delete the pending version row.
+    ///
+    /// The CAS must run before version cleanup, not after: this is exactly
+    /// the CAS-first pattern the user-driven `abort_multipart_upload` path
+    /// already uses. A concurrent `complete_multipart_upload` races against
+    /// this same session-row CAS (`in_progress -> completed` vs.
+    /// `in_progress -> aborted`) -- only one of them can win. If the sweep
+    /// loses (`Ok(false)`), a concurrent complete may have already bound this
+    /// version, so it must be left completely untouched.
+    ///
+    /// @cpt-cf-file-storage-fr-orphan-reconciliation
     async fn abort_expired_multipart_session(&self, session: MultipartUploadSession) -> usize {
-        // Clean up the backend upload handle and pending version row.
-        self.cleanup_expired_session_version(&session).await;
-
-        // Mark the multipart session itself as aborted.
         let abort_audit = AuditEntry {
             tenant_id: Uuid::nil(),
             actor_kind: "system".to_owned(),
@@ -243,13 +249,27 @@ impl CleanupEngine {
             .abort_multipart_upload(session.upload_id, abort_audit)
             .await
         {
-            Ok(_) => 1,
-            Err(e) => {
-                tracing::warn!(
-                    error = ?e,
+            Ok(true) => {
+                // We won the CAS: no concurrent complete can have bound this
+                // version afterward. Safe to clean up the backend handle and
+                // delete the pending version row.
+                self.cleanup_expired_session_version(&session).await;
+                1
+            }
+            Ok(false) => {
+                // A concurrent complete/abort already transitioned the
+                // session out of in_progress. If it was `complete`, the
+                // version is now Available and bound -- do NOT touch it.
+                tracing::info!(
                     upload_id = %session.upload_id,
-                    "cleanup: failed to mark expired multipart upload as aborted"
+                    "cleanup: skipping version cleanup, session no longer in_progress \
+                     (concurrent complete/abort won the race)"
                 );
+                0
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, upload_id = %session.upload_id,
+                    "cleanup: failed to mark expired multipart upload as aborted");
                 0
             }
         }
@@ -257,7 +277,13 @@ impl CleanupEngine {
 
     /// Helper: abort the backend upload and delete the pending version row for
     /// an expired multipart session. Both operations are best-effort.
-    async fn cleanup_expired_session_version(&self, session: &MultipartUploadSession) {
+    ///
+    /// `pub` (rather than private) solely so the P2 0.3 step-5 unit test can
+    /// invoke it directly to exercise the narrow mid-flight interleaving
+    /// window deterministically, without real concurrency: this function is
+    /// otherwise only ever called from `abort_expired_multipart_session`
+    /// after that method has already won the session CAS.
+    pub async fn cleanup_expired_session_version(&self, session: &MultipartUploadSession) {
         let Ok(Some(ver)) = self
             .store
             .get_version(session.file_id, session.version_id)
@@ -275,7 +301,11 @@ impl CleanupEngine {
         )
         .await;
 
-        // Best-effort: delete the pending version row.
+        // Best-effort: delete the pending version row. Status-guarded (P2 0.3
+        // step 5): only deletes if the row is still `pending`, so a version
+        // that a racing `complete_multipart_upload` already flipped to
+        // `available` (via `finalize_version`, ahead of its own session CAS)
+        // is left untouched -- the DELETE simply matches zero rows.
         let del_audit = orphan_reconcile_audit(
             session.file_id,
             serde_json::json!({
@@ -286,7 +316,7 @@ impl CleanupEngine {
         );
         if let Err(e) = self
             .store
-            .delete_version(session.file_id, session.version_id, del_audit)
+            .delete_pending_version(session.file_id, session.version_id, del_audit)
             .await
         {
             tracing::warn!(
@@ -430,15 +460,36 @@ impl CleanupEngine {
         self.expire_file(file, now).await
     }
 
+    /// Fetch a file's versions ahead of a retention deletion. Returns `None`
+    /// (after logging) if the store errors, so the caller can skip expiring
+    /// this file rather than treating the error as "zero versions" and
+    /// deleting it anyway.
+    ///
+    /// Extracted from `expire_file` to keep its cognitive complexity down.
+    async fn list_versions_for_expiry(
+        &self,
+        file_id: Uuid,
+    ) -> Option<Vec<file_storage_sdk::FileVersion>> {
+        match self.store.list_versions(file_id).await {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(
+                    error = ?e,
+                    file_id = %file_id,
+                    "cleanup: failed to list versions for retention-expired file; skipping expiry"
+                );
+                None
+            }
+        }
+    }
+
     /// Delete one retention-expired file (DB row + backend blobs). Returns 1 if deleted.
     async fn expire_file(&self, file: &file_storage_sdk::File, now: OffsetDateTime) -> usize {
         // Collect version blobs before deleting so we can clean them up
         // after the DB row is gone.
-        let versions = self
-            .store
-            .list_versions(file.file_id)
-            .await
-            .unwrap_or_default();
+        let Some(versions) = self.list_versions_for_expiry(file.file_id).await else {
+            return 0;
+        };
 
         let audit = AuditEntry {
             tenant_id: file.tenant_id,

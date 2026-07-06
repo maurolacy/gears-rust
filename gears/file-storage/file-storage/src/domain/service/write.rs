@@ -14,8 +14,10 @@ use crate::domain::error::DomainError;
 use crate::domain::etag;
 use crate::domain::policy::PolicyResolver;
 use crate::domain::service::{FileService, VersionRef};
+use crate::infra::content::hash;
 use crate::infra::external_clients::UsageDelta;
 use crate::infra::signed_url::{Claims, Op, UploadConstraints};
+use crate::infra::storage::Store;
 
 impl FileService {
     /// Authorize a write to `file_id` (WRITE action) without mutating anything.
@@ -60,11 +62,13 @@ impl FileService {
         // Defense-in-depth size check: re-enforce the policy size ceiling at
         // finalization time even though the sidecar already checked the
         // upload constraint in the signed URL.
-        let version = self.store.get_version(file_id, version_id).await?;
-        let (version_mime, backend_id) = version.as_ref().map_or_else(
-            || ("application/octet-stream".to_owned(), String::new()),
-            |v| (v.mime_type.clone(), v.backend_id.clone()),
-        );
+        let version = self
+            .store
+            .get_version(file_id, version_id)
+            .await?
+            .ok_or_else(|| DomainError::version_not_found(file_id, version_id))?;
+        let version_mime = version.mime_type.clone();
+        let backend_id = version.backend_id.clone();
         let policy = self
             .get_effective_policy_internal(ctx.subject_tenant_id(), file.owner_id)
             .await?;
@@ -88,6 +92,27 @@ impl FileService {
             ));
         }
 
+        // Never trust the caller's claimed size/hash: read the blob actually
+        // present at the version's backend path and recompute both from the
+        // real bytes. A finalize with no prior successful PUT (no object at
+        // that path) or a forged size/hash claim is rejected here rather than
+        // silently persisted.
+        let blob = backend.get(&version.backend_path).await.map_err(|_| {
+            DomainError::validation(
+                "content",
+                "no uploaded content found at the backend path; PUT was not completed",
+            )
+        })?;
+        let actual_size = i64::try_from(blob.len()).unwrap_or(i64::MAX);
+        if actual_size != size {
+            return Err(DomainError::validation(
+                "size",
+                "claimed size does not match the uploaded content",
+            ));
+        }
+        Store::verify_content_hash(&blob, &hash_value)?;
+        let actual_hash = hash::sha256(&blob);
+
         // @cpt-cf-file-storage-fr-audit-trail
         let audit = Self::audit_ok(
             ctx,
@@ -96,12 +121,24 @@ impl FileService {
             serde_json::json!({ "version_id": version_id, "size": size }),
         );
 
+        // Persist the read-back-derived size/hash, not the caller's claim
+        // (even though they have just been proven equal) — this is what
+        // makes the positive test prove the read-back happened rather than
+        // merely re-asserting the caller's own input.
         let ok = self
             .store
-            .finalize_version(file_id, version_id, size, hash_value, audit)
+            .finalize_version(file_id, version_id, actual_size, actual_hash, audit)
             .await?;
         if !ok {
-            return Err(DomainError::version_not_found(file_id, version_id));
+            // Distinguish "already finalized" (409, using the `version`
+            // snapshot read earlier in this call) from "row is gone" (404).
+            return Err(
+                if version.status == file_storage_sdk::VersionStatus::Available {
+                    DomainError::conflict("version already finalized")
+                } else {
+                    DomainError::version_not_found(file_id, version_id)
+                },
+            );
         }
         Ok(())
     }
@@ -438,11 +475,13 @@ impl FileService {
         // finalization time even though the sidecar already checked the upload
         // constraint in the signed URL.
         // @cpt-cf-file-storage-fr-size-limits-policy
-        let version = self.store.get_version(file_id, version_id).await?;
-        let (version_mime, backend_id) = version.as_ref().map_or_else(
-            || ("application/octet-stream".to_owned(), String::new()),
-            |v| (v.mime_type.clone(), v.backend_id.clone()),
-        );
+        let version = self
+            .store
+            .get_version(file_id, version_id)
+            .await?
+            .ok_or_else(|| DomainError::version_not_found(file_id, version_id))?;
+        let version_mime = version.mime_type.clone();
+        let backend_id = version.backend_id.clone();
         let policy = self
             .get_effective_policy_internal(file.tenant_id, file.owner_id)
             .await?;
@@ -466,6 +505,27 @@ impl FileService {
             ));
         }
 
+        // Never trust the caller's claimed size/hash: read the blob actually
+        // present at the version's backend path and recompute both from the
+        // real bytes. A finalize with no prior successful PUT (no object at
+        // that path) or a forged size/hash claim is rejected here rather than
+        // silently persisted.
+        let blob = backend.get(&version.backend_path).await.map_err(|_| {
+            DomainError::validation(
+                "content",
+                "no uploaded content found at the backend path; PUT was not completed",
+            )
+        })?;
+        let actual_size = i64::try_from(blob.len()).unwrap_or(i64::MAX);
+        if actual_size != size {
+            return Err(DomainError::validation(
+                "size",
+                "claimed size does not match the uploaded content",
+            ));
+        }
+        Store::verify_content_hash(&blob, &hash_value)?;
+        let actual_hash = hash::sha256(&blob);
+
         // @cpt-cf-file-storage-fr-audit-trail
         // Actor is "sidecar" with nil UUID — no user identity is available in
         // a token-authenticated callback.
@@ -478,12 +538,21 @@ impl FileService {
             serde_json::json!({ "version_id": version_id, "size": size }),
         );
 
+        // Persist the read-back-derived size/hash, not the caller's claim.
         let ok = self
             .store
-            .finalize_version(file_id, version_id, size, hash_value, audit)
+            .finalize_version(file_id, version_id, actual_size, actual_hash, audit)
             .await?;
         if !ok {
-            return Err(DomainError::version_not_found(file_id, version_id));
+            // Distinguish "already finalized" (409, using the `version`
+            // snapshot read earlier in this call) from "row is gone" (404).
+            return Err(
+                if version.status == file_storage_sdk::VersionStatus::Available {
+                    DomainError::conflict("version already finalized")
+                } else {
+                    DomainError::version_not_found(file_id, version_id)
+                },
+            );
         }
         Ok(())
     }
