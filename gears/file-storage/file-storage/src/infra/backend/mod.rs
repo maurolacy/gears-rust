@@ -27,10 +27,45 @@ use bytes::Bytes;
 use file_storage_sdk::ByteRange;
 
 use crate::domain::error::DomainError;
+use crate::infra::content::hash_mode::Manifest;
 
 pub use in_memory::InMemoryBackend;
 pub use local_fs::LocalFsBackend;
 pub use s3::S3Backend;
+
+use crate::infra::content::hash_mode::ManifestEntry;
+
+/// One part of a multipart completion, as handed to `complete_multipart`:
+/// `(part_number, offset, part_hash, backend_etag)` (ADR-0006). Named to keep
+/// the `StorageBackend` trait signature readable and shared verbatim across
+/// backends.
+pub type MultipartCompletionPart = (u32, u64, [u8; 32], String);
+
+/// Build the ADR-0006 offset-manifest + `root` from the
+/// [`MultipartCompletionPart`] tuples a `complete_multipart` call receives.
+/// Shared by every multipart-capable backend so the canonical wire format is
+/// produced in exactly one place (via [`Manifest::to_wire_string`]) — never
+/// hand-rolled per backend, where a subtle divergence would silently yield a
+/// different `root`.
+///
+/// Entries are sorted by ascending offset (identical to ascending part-number
+/// order for any valid plan) before the manifest is assembled, so a caller
+/// that passes parts out of order still produces the canonical manifest.
+pub(crate) fn build_manifest_and_root(
+    parts: &[MultipartCompletionPart],
+) -> Result<(Manifest, [u8; 32]), DomainError> {
+    let mut entries: Vec<ManifestEntry> = parts
+        .iter()
+        .map(|(_, offset, digest, _)| ManifestEntry {
+            offset: *offset,
+            digest: *digest,
+        })
+        .collect();
+    entries.sort_by_key(|e| e.offset);
+    let manifest = Manifest::new(entries)?;
+    let root = manifest.root();
+    Ok((manifest, root))
+}
 
 /// Optional features a backend may declare
 /// (`cpt-cf-file-storage-fr-backend-capabilities`). Versioning is **not** here —
@@ -177,12 +212,19 @@ pub trait StorageBackend: Send + Sync {
 
     /// Upload one part. Returns `(backend_etag, part_hash_bytes)`.
     ///
+    /// `part_offset` is the part's start byte offset within the assembled
+    /// object (ADR-0006). It is not used to hash the part — `part_hash` is a
+    /// flat `sha256(data)` exactly as before — but is threaded through so the
+    /// backend can build the offset-manifest at `complete` time without
+    /// re-deriving it from a plan it may not retain.
+    ///
     /// @cpt-cf-file-storage-fr-multipart-upload
     async fn upload_part(
         &self,
         _path: &str,
         _upload_handle: &str,
         _part_number: u32,
+        _part_offset: u64,
         _data: Bytes,
     ) -> Result<(String, Vec<u8>), DomainError> {
         Err(DomainError::multipart_not_supported(self.id()))
@@ -190,18 +232,24 @@ pub trait StorageBackend: Send + Sync {
 
     /// Complete a multipart upload, assembling all uploaded parts in order.
     ///
-    /// Returns the SHA-256 digest of the fully assembled object, so the control
-    /// plane can persist the hash of the *actual* stored bytes (matching what
-    /// `get`/`migrate_backend` would recompute) rather than a hash derived from
-    /// the individual part digests.
+    /// `parts` are `(part_number, offset, part_hash, backend_etag)` tuples the
+    /// control plane already collected during upload — the backend MUST build
+    /// the offset-manifest and its `root` from these (ADR-0006 mode 2) rather
+    /// than re-reading the assembled object. The backend still performs its
+    /// own native completion (S3 `CompleteMultipartUpload`, in-memory
+    /// assembly) but never re-`GetObject`s the object just to hash it.
+    ///
+    /// Returns `(manifest, root)` where `root = sha256(manifest.to_wire_string())`
+    /// — the control plane stores `root` as the version's `hash_value` and the
+    /// manifest text in `version_hash_manifest`.
     ///
     /// @cpt-cf-file-storage-fr-multipart-upload
     async fn complete_multipart(
         &self,
         _path: &str,
         _upload_handle: &str,
-        _parts: &[(u32, String)],
-    ) -> Result<Vec<u8>, DomainError> {
+        _parts: &[MultipartCompletionPart],
+    ) -> Result<(Manifest, [u8; 32]), DomainError> {
         Err(DomainError::multipart_not_supported(self.id()))
     }
 

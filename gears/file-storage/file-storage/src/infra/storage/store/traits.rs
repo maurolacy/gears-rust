@@ -232,19 +232,27 @@ impl MultipartStore for Store {
         Store::list_multipart_parts(self, upload_id).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn finalize_version(
         &self,
         file_id: Uuid,
         version_id: Uuid,
         size: i64,
         hash_value: Vec<u8>,
+        hash_mode: crate::infra::content::hash_mode::HashMode,
+        part_count: Option<i32>,
+        manifest: Option<String>,
         audit: crate::domain::audit::AuditEntry,
     ) -> Result<bool, DomainError> {
-        // `None`: the multipart-complete path does not perform MIME
-        // validation (out of scope for 1.10 — see `write.rs`'s
+        // `mime_type = None`: the multipart-complete path does not perform
+        // MIME validation (out of scope for 1.10 — see `write.rs`'s
         // `finalize_upload`/`finalize_upload_by_token` for the validated
         // single-part finalize path), so the declared type is left untouched.
-        Store::finalize_version(self, file_id, version_id, size, hash_value, None, audit).await
+        Store::finalize_version(
+            self, file_id, version_id, size, hash_value, hash_mode, part_count, manifest, None,
+            audit,
+        )
+        .await
     }
 
     async fn complete_multipart_upload(

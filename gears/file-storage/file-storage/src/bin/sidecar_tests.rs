@@ -611,9 +611,21 @@ async fn sidecar_multipart_native_backend_dispatches_to_upload_part() {
     // Complete the native multipart session directly against the
     // backend (mirrors what `complete_multipart_upload` does
     // server-side) — this only succeeds if both parts above actually
-    // landed via `upload_part`, proving the dispatch fix.
-    let content_hash = backend
-        .complete_multipart(&backend_path, &backend_handle, &[(1, etag1), (2, etag2)])
+    // landed via `upload_part`, proving the dispatch fix. ADR-0006:
+    // `complete_multipart` takes `(part_number, offset, part_hash, etag)`
+    // and returns the offset-manifest + its root.
+    let hash1 = file_storage::infra::content::hash::digest_to_array(
+        file_storage::infra::content::hash::sha256(&part1),
+    );
+    let hash2 = file_storage::infra::content::hash::digest_to_array(
+        file_storage::infra::content::hash::sha256(&part2),
+    );
+    let (manifest, root) = backend
+        .complete_multipart(
+            &backend_path,
+            &backend_handle,
+            &[(1, 0, hash1, etag1), (2, part1.len() as u64, hash2, etag2)],
+        )
         .await
         .expect("complete native multipart session - both parts must be real");
 
@@ -621,17 +633,35 @@ async fn sidecar_multipart_native_backend_dispatches_to_upload_part() {
         .get(&backend_path)
         .await
         .expect("read assembled object");
-    let mut expected = part1;
+    let mut expected = part1.clone();
     expected.extend_from_slice(&part2);
     assert_eq!(
         &assembled[..],
         &expected[..],
         "assembled object must be the exact concatenation of the two parts"
     );
+
+    // The returned root is the offset-manifest composite (ADR-0006 mode 2),
+    // independently reproducible from the per-part digests/offsets.
+    let expected_manifest = file_storage::infra::content::hash_mode::Manifest::new(vec![
+        file_storage::infra::content::hash_mode::ManifestEntry {
+            offset: 0,
+            digest: hash1,
+        },
+        file_storage::infra::content::hash_mode::ManifestEntry {
+            offset: part1.len() as u64,
+            digest: hash2,
+        },
+    ])
+    .unwrap();
     assert_eq!(
-        content_hash,
-        file_storage::infra::content::hash::sha256(&expected),
-        "complete_multipart's returned digest must match the assembled bytes"
+        manifest.to_wire_string(),
+        expected_manifest.to_wire_string()
+    );
+    assert_eq!(
+        root,
+        expected_manifest.root(),
+        "complete_multipart's returned root must be sha256(manifest)"
     );
 }
 

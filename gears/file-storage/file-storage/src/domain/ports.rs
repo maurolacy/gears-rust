@@ -218,12 +218,22 @@ pub trait MultipartStore: Send + Sync {
     ) -> Result<Vec<MultipartPart>, DomainError>;
 
     /// Record a version's size + hash and mark it `available`.
+    ///
+    /// `hash_mode`/`part_count`/`manifest` (ADR-0006) let the multipart
+    /// completion persist the `multipart-composite-sha256` discriminator, its
+    /// part count, and the offset-manifest row transactionally with the
+    /// version-row update. `manifest` is `Some` only for
+    /// `multipart-composite-sha256` completions.
+    #[allow(clippy::too_many_arguments)]
     async fn finalize_version(
         &self,
         file_id: Uuid,
         version_id: Uuid,
         size: i64,
         hash_value: Vec<u8>,
+        hash_mode: crate::infra::content::hash_mode::HashMode,
+        part_count: Option<i32>,
+        manifest: Option<String>,
         audit: AuditEntry,
     ) -> Result<bool, DomainError>;
 

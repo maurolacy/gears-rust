@@ -14,6 +14,9 @@ use file_storage_sdk::{FileVersion, VersionStatus};
 use crate::domain::error::DomainError;
 use crate::infra::storage::db::db_err;
 use crate::infra::storage::entity::file_version::{ActiveModel, Column, Entity};
+use crate::infra::storage::entity::version_hash_manifest::{
+    ActiveModel as ManifestActiveModel, Column as ManifestColumn, Entity as ManifestEntity,
+};
 
 /// Repository over the `file_versions` table.
 #[derive(Clone, Default)]
@@ -39,6 +42,8 @@ impl VersionRepo {
             size: Set(v.size),
             hash_algorithm: Set(v.hash_algorithm.clone()),
             hash_value: Set(v.hash_value.clone()),
+            hash_mode: Set(v.hash_mode.clone()),
+            part_count: Set(v.part_count),
             status: Set(v.status.as_str().to_owned()),
             is_current: Set(v.is_current),
             backend_id: Set(v.backend_id.clone()),
@@ -140,6 +145,13 @@ impl VersionRepo {
 
     /// Record the streamed content's size and hash and mark the version
     /// `available` (the sidecar calls this after durably writing the bytes).
+    ///
+    /// `hash_mode`/`part_count` (ADR-0006) are set here, at **finalize** time,
+    /// not at pending-insert time — a pending row is created before it is
+    /// known whether the upload will complete single-part (`whole-sha256`,
+    /// `part_count = None`) or multipart (`multipart-composite-sha256`,
+    /// `part_count = Some(n)`). `hash_algorithm` is never touched (it is
+    /// always `'SHA-256'` for both modes).
     #[allow(clippy::too_many_arguments)]
     pub async fn finalize<C: DBRunner>(
         &self,
@@ -149,6 +161,8 @@ impl VersionRepo {
         version_id: Uuid,
         size: i64,
         hash_value: Vec<u8>,
+        hash_mode: &str,
+        part_count: Option<i32>,
         mime_type: Option<String>,
     ) -> Result<bool, DomainError> {
         // Scope the update to the full `(file_id, version_id)` key so a
@@ -156,6 +170,8 @@ impl VersionRepo {
         let mut update = Entity::update_many()
             .col_expr(Column::Size, Expr::value(size))
             .col_expr(Column::HashValue, Expr::value(hash_value))
+            .col_expr(Column::HashMode, Expr::value(hash_mode))
+            .col_expr(Column::PartCount, Expr::value(part_count))
             .col_expr(
                 Column::Status,
                 Expr::value(file_storage_sdk::VersionStatus::Available.as_str()),
@@ -179,6 +195,48 @@ impl VersionRepo {
             .await
             .map_err(db_err)?;
         Ok(res.rows_affected == 1)
+    }
+
+    /// Insert the `version_hash_manifest` row for a `multipart-composite-sha256`
+    /// version (ADR-0006 §4/§5). Called in the **same transaction** as
+    /// [`Self::finalize`] so the manifest and the version row's
+    /// `(hash_mode, part_count, hash_value = root)` are committed atomically.
+    pub async fn insert_manifest<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        version_id: Uuid,
+        manifest: &str,
+        now: OffsetDateTime,
+    ) -> Result<(), DomainError> {
+        let am = ManifestActiveModel {
+            version_id: Set(version_id),
+            manifest: Set(manifest.to_owned()),
+            created_at: Set(now),
+        };
+        secure_insert::<ManifestEntity>(am, scope, conn)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Fetch the `version_hash_manifest` row's manifest text for a version, if
+    /// one exists (`multipart-composite-sha256` versions only). Used by
+    /// `migrate_backend` and any mode-aware re-verification path.
+    pub async fn get_manifest<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        version_id: Uuid,
+    ) -> Result<Option<String>, DomainError> {
+        let found = ManifestEntity::find()
+            .filter(ManifestColumn::VersionId.eq(version_id))
+            .secure()
+            .scope_with(scope)
+            .one(conn)
+            .await
+            .map_err(db_err)?;
+        Ok(found.map(|m| m.manifest))
     }
 
     /// Clear the `is_current` flag on all versions of a file (used before

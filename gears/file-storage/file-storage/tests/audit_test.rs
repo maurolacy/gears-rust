@@ -477,7 +477,13 @@ async fn multipart_complete_leaves_audit_rows() {
     let backend_path = format!("/{}/{}", ticket.file_id, plan.version_id);
 
     let (backend_etag, part_hash) = backend
-        .upload_part(&backend_path, &session.backend_upload_handle, 1, part_data)
+        .upload_part(
+            &backend_path,
+            &session.backend_upload_handle,
+            1,
+            0,
+            part_data,
+        )
         .await
         .unwrap();
     let size = i64::try_from(declared_size).unwrap();

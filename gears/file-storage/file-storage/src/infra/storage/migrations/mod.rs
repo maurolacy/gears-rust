@@ -8,6 +8,7 @@ mod m20260701_000002_multipart_plan_columns;
 mod m20260706_000001_idempotency_subject_id;
 mod m20260706_000002_idempotency_request_hash;
 mod m20260706_000003_policies_unique_scope;
+mod m20260707_000001_content_hash_modes;
 
 /// File-storage migrator. P1 ships the initial control-plane metadata tables;
 /// P2 adds the policy store, retention rules, multipart uploads + idempotency
@@ -21,6 +22,9 @@ mod m20260706_000003_policies_unique_scope;
 /// P2-remediation-2.4 adds two partial unique indexes on `policies` so at
 /// most one row can exist per `(tenant_id, scope, scope_owner_id)`, closing
 /// the upsert delete-then-insert race.
+/// ADR-0006 adds `hash_mode`/`part_count` to `file_versions` and the new
+/// `version_hash_manifest` table for the multipart offset-manifest composite
+/// content-hash mode.
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -33,6 +37,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260706_000001_idempotency_subject_id::Migration),
             Box::new(m20260706_000002_idempotency_request_hash::Migration),
             Box::new(m20260706_000003_policies_unique_scope::Migration),
+            Box::new(m20260707_000001_content_hash_modes::Migration),
         ]
     }
 }

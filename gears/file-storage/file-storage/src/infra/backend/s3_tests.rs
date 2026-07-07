@@ -243,16 +243,21 @@ async fn s3_backend_multipart_initiate_upload_complete_round_trip() {
     let path = "multipart/round-trip";
     let upload_handle = backend.initiate_multipart(path).await.unwrap();
 
+    // ADR-0006: `upload_part` now takes each part's byte offset within the
+    // assembled object (part1 @ 0, part2 @ 5 MiB, part3 @ 10 MiB).
+    let off1 = 0u64;
+    let off2 = part_size as u64;
+    let off3 = 2 * part_size as u64;
     let (etag1, hash1) = backend
-        .upload_part(path, &upload_handle, 1, Bytes::from(part1.clone()))
+        .upload_part(path, &upload_handle, 1, off1, Bytes::from(part1.clone()))
         .await
         .unwrap();
     let (etag2, hash2) = backend
-        .upload_part(path, &upload_handle, 2, Bytes::from(part2.clone()))
+        .upload_part(path, &upload_handle, 2, off2, Bytes::from(part2.clone()))
         .await
         .unwrap();
     let (etag3, hash3) = backend
-        .upload_part(path, &upload_handle, 3, Bytes::from(part3.clone()))
+        .upload_part(path, &upload_handle, 3, off3, Bytes::from(part3.clone()))
         .await
         .unwrap();
 
@@ -262,19 +267,47 @@ async fn s3_backend_multipart_initiate_upload_complete_round_trip() {
     assert_eq!(hash2, hash::sha256(&part2));
     assert_eq!(hash3, hash::sha256(&part3));
 
-    let completion_parts = vec![(3, etag3), (1, etag1), (2, etag2)]; // deliberately out of order
-    let digest = backend
+    let to_arr = |v: Vec<u8>| -> [u8; 32] { v.try_into().unwrap() };
+    // Deliberately out of order — `complete_multipart` sorts by offset.
+    let completion_parts = vec![
+        (3u32, off3, to_arr(hash3.clone()), etag3),
+        (1u32, off1, to_arr(hash1.clone()), etag1),
+        (2u32, off2, to_arr(hash2.clone()), etag2),
+    ];
+    let (manifest, root) = backend
         .complete_multipart(path, &upload_handle, &completion_parts)
         .await
         .unwrap();
 
+    // ADR-0006 mode 2: the stored digest is `sha256(manifest)`, an
+    // offset-manifest composite — NOT `sha256(assembled bytes)`. Build the
+    // expected manifest independently from the known per-part digests/offsets.
+    let expected_manifest = crate::infra::content::hash_mode::Manifest::new(vec![
+        crate::infra::content::hash_mode::ManifestEntry {
+            offset: off1,
+            digest: to_arr(hash::sha256(&part1)),
+        },
+        crate::infra::content::hash_mode::ManifestEntry {
+            offset: off2,
+            digest: to_arr(hash::sha256(&part2)),
+        },
+        crate::infra::content::hash_mode::ManifestEntry {
+            offset: off3,
+            digest: to_arr(hash::sha256(&part3)),
+        },
+    ])
+    .unwrap();
+    assert_eq!(
+        manifest.to_wire_string(),
+        expected_manifest.to_wire_string()
+    );
+    assert_eq!(root, expected_manifest.root());
+
+    // A subsequent `get()` returns the full assembled object.
     let mut expected_bytes = Vec::with_capacity(part1.len() + part2.len() + part3.len());
     expected_bytes.extend_from_slice(&part1);
     expected_bytes.extend_from_slice(&part2);
     expected_bytes.extend_from_slice(&part3);
-    assert_eq!(digest, hash::sha256(&expected_bytes));
-
-    // A subsequent `get()` returns the full assembled object.
     let got = backend.get(path).await.unwrap();
     assert_eq!(got.as_ref(), expected_bytes.as_slice());
 
@@ -303,6 +336,7 @@ async fn s3_backend_multipart_abort_discards_parts() {
             path,
             &upload_handle,
             1,
+            0,
             Bytes::from_static(b"never completed"),
         )
         .await
@@ -332,7 +366,7 @@ async fn s3_backend_upload_part_rejects_part_number_outside_s3_limits() {
     .expect("construct S3Backend");
 
     let over_limit = backend
-        .upload_part("some/path", "handle", 10_001, Bytes::from_static(b"x"))
+        .upload_part("some/path", "handle", 10_001, 0, Bytes::from_static(b"x"))
         .await;
     assert!(
         over_limit.is_err(),
@@ -340,7 +374,7 @@ async fn s3_backend_upload_part_rejects_part_number_outside_s3_limits() {
     );
 
     let zero = backend
-        .upload_part("some/path", "handle", 0, Bytes::from_static(b"x"))
+        .upload_part("some/path", "handle", 0, 0, Bytes::from_static(b"x"))
         .await;
     assert!(
         zero.is_err(),

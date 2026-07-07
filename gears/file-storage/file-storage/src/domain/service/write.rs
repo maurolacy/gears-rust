@@ -268,6 +268,11 @@ impl FileService {
                 version_id,
                 actual_size,
                 actual_hash,
+                // Single-part upload → always whole-object SHA-256 (ADR-0006
+                // mode 1). No part count, no offset-manifest row.
+                crate::infra::content::hash_mode::HashMode::WholeSha256,
+                None,
+                None,
                 Some(validated_mime),
                 audit,
             )
@@ -757,6 +762,11 @@ impl FileService {
                 version_id,
                 actual_size,
                 actual_hash,
+                // Single-part upload → always whole-object SHA-256 (ADR-0006
+                // mode 1). No part count, no offset-manifest row.
+                crate::infra::content::hash_mode::HashMode::WholeSha256,
+                None,
+                None,
                 Some(validated_mime),
                 audit,
             )

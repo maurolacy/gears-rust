@@ -13,6 +13,7 @@ use file_storage_sdk::{File, FileVersion, VersionStatus};
 
 use crate::domain::audit::{AuditEntry, FileEvent};
 use crate::domain::error::DomainError;
+use crate::infra::content::hash_mode::HashMode;
 use crate::infra::storage::db::db_err;
 use crate::infra::storage::store::{Store, pending_version};
 
@@ -126,43 +127,81 @@ impl Store {
     /// finalize call sites); pass `None` to leave the declared type untouched
     /// (the multipart-complete path does not perform MIME validation).
     ///
+    /// `hash_mode`/`part_count` (ADR-0006) are set here at finalize time. For
+    /// a `multipart-composite-sha256` completion, `manifest` carries the
+    /// canonical offset-manifest text (§3): its `version_hash_manifest` row is
+    /// inserted in the **same transaction** as the version-row update, so a
+    /// completed multipart version and its verification manifest are committed
+    /// atomically. `whole-sha256` completions pass `part_count = None` /
+    /// `manifest = None` and write no manifest row.
+    ///
     /// An audit row is written in the same transaction.
     ///
     /// @cpt-cf-file-storage-fr-audit-trail
     /// @cpt-cf-file-storage-nfr-audit-completeness
+    #[allow(clippy::too_many_arguments)]
     pub async fn finalize_version(
         &self,
         file_id: Uuid,
         version_id: Uuid,
         size: i64,
         hash_value: Vec<u8>,
+        hash_mode: HashMode,
+        part_count: Option<i32>,
+        manifest: Option<String>,
         mime_type: Option<String>,
         audit: AuditEntry,
     ) -> Result<bool, DomainError> {
         let versions = self.repos.versions.clone();
         let audit_repo = self.repos.audit.clone();
+        let hash_mode_str = hash_mode.as_str();
+        let now = OffsetDateTime::now_utc();
         self.db
             .db()
             .transaction_ref_mapped(move |tx| {
                 Box::pin(async move {
+                    let scope = AccessScope::allow_all();
                     let updated = versions
                         .finalize(
                             tx,
-                            &AccessScope::allow_all(),
+                            &scope,
                             file_id,
                             version_id,
                             size,
                             hash_value,
+                            hash_mode_str,
+                            part_count,
                             mime_type,
                         )
                         .await?;
                     if updated {
+                        // Persist the manifest row transactionally with the
+                        // version update for multipart-composite completions.
+                        if let Some(manifest) = manifest {
+                            versions
+                                .insert_manifest(tx, &scope, version_id, &manifest, now)
+                                .await?;
+                        }
                         // @cpt-cf-file-storage-nfr-audit-completeness
                         audit_repo.insert(tx, &audit).await?;
                     }
                     Ok::<bool, DomainError>(updated)
                 })
             })
+            .await
+    }
+
+    /// Fetch the `version_hash_manifest` text for a version, if one exists
+    /// (`multipart-composite-sha256` versions only). Backs mode-aware
+    /// re-verification in `migrate_backend`.
+    pub async fn get_version_manifest(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Option<String>, DomainError> {
+        let conn = self.db.conn().map_err(db_err)?;
+        self.repos
+            .versions
+            .get_manifest(&conn, &AccessScope::allow_all(), version_id)
             .await
     }
 

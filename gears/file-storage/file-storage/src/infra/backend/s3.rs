@@ -38,8 +38,11 @@ use rusty_s3::S3Action;
 
 use crate::domain::error::DomainError;
 use crate::infra::content::hash;
+use crate::infra::content::hash_mode::Manifest;
 
-use super::{BackendCapabilities, StorageBackend};
+use super::{
+    BackendCapabilities, MultipartCompletionPart, StorageBackend, build_manifest_and_root,
+};
 
 /// Expiry for the presigned URLs this backend signs. Requests execute
 /// immediately after signing (there is no user-facing redirect), so this only
@@ -232,32 +235,14 @@ impl S3Backend {
         DomainError::backend(&self.id, format!("HEAD {path} failed: {status}"))
     }
 
-    /// Presign and execute a `GetObject` for `path` exactly like `get_stream`
-    /// does, but fold the response chunk-by-chunk into a `hash::Hasher`
-    /// accumulator instead of returning them, so at most one chunk is held in
-    /// memory at a time regardless of object size. Used by
-    /// `complete_multipart` to compute the trait-mandated whole-object
-    /// SHA-256 without re-inflating a (potentially huge) just-assembled
-    /// multipart object into memory.
-    async fn get_and_hash_streaming(&self, path: &str) -> Result<Vec<u8>, DomainError> {
-        let mut stream = self.get_stream(path).await?;
-        let mut hasher = hash::Hasher::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| DomainError::backend(&self.id, e.to_string()))?;
-            hasher.update(&chunk);
-        }
-        Ok(hasher.finalize())
-    }
-
     /// POST a `CompleteMultipartUpload` request that assembles `parts`
     /// (defensively sorted ascending by part number) into the final object.
-    /// Unlike the trait's `complete_multipart`, this does **not** re-read the
-    /// assembled object to hash it: callers that already hold the content
-    /// digest — notably `put_stream`, which hashes incrementally as it uploads
-    /// — call this directly to skip a redundant full re-download of a
-    /// (potentially multi-gigabyte) object. `complete_multipart` layers
-    /// `get_and_hash_streaming` on top of this only when the whole-object
-    /// digest is genuinely required (the control-plane multipart flow).
+    /// This does **not** re-read the assembled object to hash it: both
+    /// callers already hold what they need without a re-download — `put_stream`
+    /// hashed the whole object incrementally as it uploaded, and
+    /// `complete_multipart` builds the ADR-0006 offset-manifest root from the
+    /// per-part digests it was handed. Either way a large multipart upload
+    /// stays a single pass over the bytes instead of upload-then-re-download.
     async fn finalize_multipart(
         &self,
         path: &str,
@@ -348,6 +333,12 @@ impl StorageBackend for S3Backend {
         let mut upload_handle: Option<String> = None;
         let mut parts: Vec<(u32, String)> = Vec::new();
         let mut next_part_number: u32 = 1;
+        // Byte offset of the next part within the object. `put_stream`
+        // produces a `whole-sha256` version (the digest is computed
+        // incrementally over the whole stream, not from an offset-manifest),
+        // so this is threaded purely to satisfy `upload_part`'s ADR-0006
+        // signature; it is never used to build a manifest on this path.
+        let mut next_part_offset: u64 = 0;
 
         let collect_result: Result<(), DomainError> = async {
             while let Some(chunk) = stream.next().await {
@@ -368,6 +359,8 @@ impl StorageBackend for S3Backend {
                     let part_size =
                         usize::try_from(self.multipart_threshold_bytes).unwrap_or(buf.len());
                     let part_bytes: Vec<u8> = buf.drain(..part_size).collect();
+                    let part_offset = next_part_offset;
+                    next_part_offset += part_bytes.len() as u64;
                     let part_number = next_part_number;
                     next_part_number += 1;
                     let Some(handle) = upload_handle.as_deref() else {
@@ -380,7 +373,13 @@ impl StorageBackend for S3Backend {
                         ));
                     };
                     let (etag, _part_hash) = self
-                        .upload_part(path, handle, part_number, Bytes::from(part_bytes))
+                        .upload_part(
+                            path,
+                            handle,
+                            part_number,
+                            part_offset,
+                            Bytes::from(part_bytes),
+                        )
                         .await?;
                     parts.push((part_number, etag));
                 }
@@ -411,8 +410,9 @@ impl StorageBackend for S3Backend {
             Some(handle) => {
                 if !buf.is_empty() {
                     let part_number = next_part_number;
+                    let part_offset = next_part_offset;
                     match self
-                        .upload_part(path, &handle, part_number, Bytes::from(buf))
+                        .upload_part(path, &handle, part_number, part_offset, Bytes::from(buf))
                         .await
                     {
                         Ok((etag, _part_hash)) => parts.push((part_number, etag)),
@@ -637,6 +637,7 @@ impl StorageBackend for S3Backend {
         path: &str,
         upload_handle: &str,
         part_number: u32,
+        _part_offset: u64,
         data: Bytes,
     ) -> Result<(String, Vec<u8>), DomainError> {
         let part_hash = hash::sha256(&data);
@@ -684,30 +685,33 @@ impl StorageBackend for S3Backend {
         Ok((etag, part_hash))
     }
 
-    /// `CompleteMultipartUpload`: builds the request XML body from `parts`
-    /// (sorted ascending by part number, defensively, even though the caller
-    /// is expected to already pass them in order) via rusty-s3's own
-    /// `CompleteMultipartUpload::body()` builder, POSTs it to the signed URL,
-    /// then — per the trait's contract — re-reads the fully assembled object
-    /// via a **streamed** `GetObject` and returns the SHA-256 computed
-    /// incrementally over its body (S3's own multipart `ETag` is an
-    /// md5-of-part-md5s construction, not usable as this gear's digest
-    /// convention). Streaming (rather than buffering the whole object via
-    /// `self.get`) keeps this bounded to one response chunk at a time, so
-    /// completing a multi-gigabyte multipart upload never re-inflates the
-    /// entire object into memory just to hash it — see `get_and_hash_streaming`.
+    /// `CompleteMultipartUpload`: builds the request XML body from `parts`'
+    /// backend `ETag`s via `finalize_multipart` (the shared POST helper that
+    /// does **not** re-read the object), then builds the ADR-0006
+    /// offset-manifest and its `root` from the `(offset, part_hash)` pairs the
+    /// caller already collected during upload — **no `GetObject` re-read of the
+    /// assembled object**. This removes the mandatory whole-object re-download
+    /// on every completed multipart upload (S3's own multipart `ETag` is an
+    /// `md5-of-part-md5s` construction and could not serve as this gear's digest
+    /// anyway; the manifest root is a plain SHA-256 construction that a client
+    /// can independently re-derive from object bytes + the returned manifest).
     async fn complete_multipart(
         &self,
         path: &str,
         upload_handle: &str,
-        parts: &[(u32, String)],
-    ) -> Result<Vec<u8>, DomainError> {
-        self.finalize_multipart(path, upload_handle, parts).await?;
+        parts: &[MultipartCompletionPart],
+    ) -> Result<(Manifest, [u8; 32]), DomainError> {
+        // S3's native completion still needs the (part_number, backend_etag)
+        // pairs to assemble the object; it does not need the offsets/hashes.
+        let etag_parts: Vec<(u32, String)> = parts
+            .iter()
+            .map(|(part_number, _, _, etag)| (*part_number, etag.clone()))
+            .collect();
+        self.finalize_multipart(path, upload_handle, &etag_parts)
+            .await?;
 
-        // Re-read the fully assembled object and hash it incrementally,
-        // rather than buffering it whole — the trait contract wants the
-        // SHA-256 of the actual stored bytes, not S3's own multipart ETag.
-        self.get_and_hash_streaming(path).await
+        // @cpt-cf-file-storage-algo-content-hash-modes-build-manifest
+        build_manifest_and_root(parts)
     }
 
     /// `AbortMultipartUpload`: discards all previously uploaded parts.

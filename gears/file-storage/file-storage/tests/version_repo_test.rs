@@ -73,6 +73,8 @@ fn new_version(file_id: Uuid, version_id: Uuid, size: i64) -> FileVersion {
         size,
         hash_algorithm: "SHA-256".to_owned(),
         hash_value: vec![0u8; 32],
+        hash_mode: "whole-sha256".to_owned(),
+        part_count: None,
         status: VersionStatus::Available,
         is_current: false,
         backend_id: "mem".to_owned(),

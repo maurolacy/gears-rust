@@ -669,23 +669,49 @@ impl MultipartService {
         // @cpt-end:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-policy-check
 
         // @cpt-begin:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-assemble
-        // Build the parts list for the backend.
-        let backend_parts: Vec<(u32, String)> = parts
-            .iter()
-            .map(|p| (p.part_number, p.backend_etag.clone()))
-            .collect();
+        // Build the parts list for the backend, threading each part's byte
+        // offset and its already-computed SHA-256 digest (ADR-0006) — these
+        // are no longer discarded. The offset is the running sum of prior
+        // parts' sizes; parts are listed in ascending part-number order (the
+        // repo's `list_parts` `ORDER BY part_number`), which for any valid
+        // plan is identical to ascending offset order.
+        let mut backend_parts: Vec<(u32, u64, [u8; 32], String)> = Vec::with_capacity(parts.len());
+        let mut running_offset: u64 = 0;
+        for p in &parts {
+            let digest: [u8; 32] = p.part_hash.clone().try_into().map_err(|_| {
+                DomainError::validation(
+                    "part_hash",
+                    format!(
+                        "part {} hash is not a 32-byte SHA-256 digest",
+                        p.part_number
+                    ),
+                )
+            })?;
+            backend_parts.push((
+                p.part_number,
+                running_offset,
+                digest,
+                p.backend_etag.clone(),
+            ));
+            running_offset += u64::try_from(p.size).unwrap_or(0);
+        }
 
-        // Assemble on the backend, which returns the SHA-256 of the fully
-        // assembled object. This is the hash of the bytes actually stored — a
-        // hash over concatenated part digests would not match a later `get` +
-        // recompute and would break `migrate_backend`'s integrity check.
-        let content_hash = backend
+        // Assemble on the backend, which builds the offset-manifest and its
+        // `root` from the per-part digests+offsets above — **no re-read of the
+        // assembled object** (ADR-0006). `root` becomes the version's
+        // `hash_value`; the manifest text is persisted in
+        // `version_hash_manifest` transactionally with the version row below.
+        let (manifest, root) = backend
             .complete_multipart(
                 &backend_path,
                 &session.backend_upload_handle,
                 &backend_parts,
             )
             .await?;
+        let content_hash = root.to_vec();
+        let manifest_text = manifest.to_wire_string();
+        let part_count = i32::try_from(parts.len())
+            .map_err(|_| DomainError::validation("part_count", "part count overflows i32"))?;
         // @cpt-end:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-assemble
 
         // @cpt-begin:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-finalize-version
@@ -703,6 +729,9 @@ impl MultipartService {
                 session.version_id,
                 total_size,
                 content_hash,
+                crate::infra::content::hash_mode::HashMode::MultipartCompositeSha256,
+                Some(part_count),
+                Some(manifest_text),
                 finalize_audit,
             )
             .await?;

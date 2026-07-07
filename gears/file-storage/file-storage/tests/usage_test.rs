@@ -232,7 +232,7 @@ async fn drive_multipart_upload(
     let backend_path = format!("/{file_id}/{}", plan.version_id);
 
     let (backend_etag, part_hash) = backend
-        .upload_part(&backend_path, &session.backend_upload_handle, 1, data)
+        .upload_part(&backend_path, &session.backend_upload_handle, 1, 0, data)
         .await
         .expect("backend upload_part");
 

@@ -144,6 +144,14 @@ pub struct VersionDto {
     pub size: i64,
     pub hash_algorithm: String,
     pub hash: String,
+    /// ADR-0006 content-hash mode: `"whole-sha256"` (`hash` is
+    /// `sha256(object bytes)`) or `"multipart-composite-sha256"` (`hash` is
+    /// `sha256(manifest)`, the offset-manifest composite root).
+    pub hash_mode: String,
+    /// Number of parts for a `multipart-composite-sha256` version; omitted
+    /// (`null`) for `whole-sha256`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part_count: Option<i32>,
     pub status: String,
     pub is_current: bool,
     #[serde(with = "time::serde::rfc3339")]
@@ -158,6 +166,8 @@ impl From<FileVersion> for VersionDto {
             size: v.size,
             hash_algorithm: v.hash_algorithm,
             hash: hex::encode(&v.hash_value),
+            hash_mode: v.hash_mode,
+            part_count: v.part_count,
             status: v.status.as_str().to_owned(),
             is_current: v.is_current,
             created_at: v.created_at,

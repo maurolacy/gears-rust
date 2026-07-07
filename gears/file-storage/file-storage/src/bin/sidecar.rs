@@ -754,6 +754,9 @@ async fn write_multipart_part_native(
             &claims.backend_path,
             &claims.multipart.backend_handle,
             part_number,
+            // ADR-0006: the part's byte offset within the assembled object,
+            // authoritatively minted into the token at initiate time.
+            claims.multipart.offset,
             buf.freeze(),
         )
         .await

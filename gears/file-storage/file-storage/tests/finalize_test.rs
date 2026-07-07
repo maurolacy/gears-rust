@@ -337,6 +337,8 @@ async fn version_repo_finalize_twice_second_call_returns_false() {
         size: 0,
         hash_algorithm: "SHA-256".to_owned(),
         hash_value: vec![0u8; 32],
+        hash_mode: "whole-sha256".to_owned(),
+        part_count: None,
         status: VersionStatus::Pending,
         is_current: false,
         backend_id: "mem".to_owned(),
@@ -358,6 +360,8 @@ async fn version_repo_finalize_twice_second_call_returns_false() {
             version_id,
             100,
             hash_a.clone(),
+            "whole-sha256",
+            None,
             None,
         )
         .await
@@ -365,7 +369,17 @@ async fn version_repo_finalize_twice_second_call_returns_false() {
     assert!(first, "first finalize call on a pending row must succeed");
 
     let second = repo
-        .finalize(&conn, &scope, file_id, version_id, 200, hash_b, None)
+        .finalize(
+            &conn,
+            &scope,
+            file_id,
+            version_id,
+            200,
+            hash_b,
+            "whole-sha256",
+            None,
+            None,
+        )
         .await
         .expect("second finalize call");
     assert!(

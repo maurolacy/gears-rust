@@ -86,10 +86,36 @@ impl FileService {
         // Read the blob from the source backend.
         let bytes = source.get(&version.backend_path).await?;
 
-        // Verify content hash before writing to destination.
+        // Verify content hash before writing to destination — mode-aware
+        // (ADR-0006). For `whole-sha256` this is the unchanged whole-object
+        // re-hash. For `multipart-composite-sha256` it fetches the version's
+        // `version_hash_manifest` row and verifies from the object bytes +
+        // that manifest ALONE (split-rehash-rebuild-compare), with no
+        // dependency on `multipart_upload_parts` still existing — the manifest
+        // is the durable, self-contained record.
         // Hash computation stays in `Store` (which already owns the SHA-256
         // allow-list import), so `FileService` needs no direct `hash` edge.
-        Store::verify_content_hash(&bytes, &version.hash_value)?;
+        let hash_mode = crate::infra::content::hash_mode::HashMode::parse(&version.hash_mode)
+            .ok_or_else(|| {
+                DomainError::database(format!(
+                    "version {} has an unrecognized hash_mode {:?}",
+                    version.version_id, version.hash_mode
+                ))
+            })?;
+        let manifest = match hash_mode {
+            crate::infra::content::hash_mode::HashMode::WholeSha256 => None,
+            crate::infra::content::hash_mode::HashMode::MultipartCompositeSha256 => {
+                Some(self.store.get_version_manifest(version.version_id).await?.ok_or_else(
+                    || {
+                        DomainError::database(format!(
+                            "multipart-composite version {} is missing its version_hash_manifest row",
+                            version.version_id
+                        ))
+                    },
+                )?)
+            }
+        };
+        Store::verify_content_hash(&bytes, hash_mode, &version.hash_value, manifest.as_deref())?;
 
         // Write to the destination at the canonical path.
         let dest_path = Self::backend_path(file_id, version.version_id);

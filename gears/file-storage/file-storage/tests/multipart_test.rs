@@ -313,7 +313,7 @@ async fn simulate_sidecar_put_part(
     // Upload through the backend's native multipart path (upload_part => keyed
     // by the upload handle for later assembly in complete_multipart).
     let (backend_etag, part_hash) = backend
-        .upload_part(backend_path, backend_handle, part_number, data)
+        .upload_part(backend_path, backend_handle, part_number, part.offset, data)
         .await
         .expect("backend upload_part");
 

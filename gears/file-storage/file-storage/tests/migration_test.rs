@@ -15,6 +15,9 @@ use file_storage::Migrator;
 const TENANT: &str = "00000000-0000-0000-0000-0000000000a1";
 const OWNER: &str = "00000000-0000-0000-0000-0000000000b1";
 const FILE: &str = "00000000-0000-0000-0000-0000000000c1";
+/// Version id used by the ADR-0006 content-hash-modes tests appended at the
+/// end of this file.
+const VERSION: &str = "00000000-0000-0000-0000-0000000000d1";
 const GTS: &str = "gts.cf.fstorage.file.type.v1~x.test.v1~";
 /// 32 zero bytes — the only hash length the P1 `SHA-256` CHECK accepts.
 const HASH32: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -674,5 +677,148 @@ async fn deleting_file_cascades_to_versions_and_metadata() {
         count(&db, "SELECT COUNT(*) AS c FROM files_custom_metadata").await,
         0,
         "custom metadata must be cascade-deleted with the file"
+    );
+}
+
+// ── ADR-0006 content-hash modes: hash_mode / part_count / manifest ───────────
+
+/// AC6: a pre-existing `file_versions` row (inserted without the ADR-0006
+/// columns, exactly as P1/P2 code did) backfills to `hash_mode =
+/// 'whole-sha256'`, `part_count = NULL`, and has no `version_hash_manifest`
+/// row — driven entirely by the column DEFAULT, with no data migration.
+#[tokio::test]
+async fn content_hash_modes_backfill_existing_rows_to_whole_sha256() {
+    let db = migrated_db().await;
+    insert_file(&db, FILE).await;
+    // `insert_version` deliberately does NOT mention hash_mode/part_count.
+    insert_version(&db, FILE, VERSION, 1).await;
+
+    let row = db
+        .query_one(stmt(
+            &db,
+            format!(
+                "SELECT hash_mode AS m, \
+                 (SELECT COUNT(*) FROM file_versions WHERE part_count IS NULL) AS c \
+                 FROM file_versions WHERE version_id = '{VERSION}'"
+            ),
+        ))
+        .await
+        .expect("query")
+        .expect("one row");
+    assert_eq!(
+        row.try_get::<String>("", "m").expect("hash_mode"),
+        "whole-sha256",
+        "existing rows must backfill to whole-sha256"
+    );
+    assert_eq!(
+        row.try_get::<i64>("", "c").expect("null part_count count"),
+        1,
+        "existing rows must have part_count NULL"
+    );
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT COUNT(*) AS c FROM version_hash_manifest WHERE version_id = '{VERSION}'"
+            )
+        )
+        .await,
+        0,
+        "whole-sha256 versions must have no manifest row"
+    );
+}
+
+/// The cross-column presence CHECK rejects `part_count IS NULL` for a
+/// `multipart-composite-sha256` row.
+#[tokio::test]
+async fn content_hash_modes_rejects_multipart_without_part_count() {
+    let db = migrated_db().await;
+    insert_file(&db, FILE).await;
+    let res = db
+        .execute(stmt(
+            &db,
+            format!(
+                "INSERT INTO file_versions \
+                 (file_id, version_id, mime_type, size, hash_value, hash_mode, part_count, \
+                  status, is_current, backend_id, backend_path) \
+                 VALUES ('{FILE}', '{VERSION}', 'text/plain', 0, X'{HASH32}', \
+                 'multipart-composite-sha256', NULL, 'available', 0, 'local', '/x')"
+            ),
+        ))
+        .await;
+    assert!(
+        res.is_err(),
+        "multipart-composite-sha256 with a NULL part_count must violate the presence CHECK"
+    );
+}
+
+/// The cross-column presence CHECK rejects a non-NULL `part_count` for a
+/// `whole-sha256` row.
+#[tokio::test]
+async fn content_hash_modes_rejects_whole_with_part_count() {
+    let db = migrated_db().await;
+    insert_file(&db, FILE).await;
+    let res = db
+        .execute(stmt(
+            &db,
+            format!(
+                "INSERT INTO file_versions \
+                 (file_id, version_id, mime_type, size, hash_value, hash_mode, part_count, \
+                  status, is_current, backend_id, backend_path) \
+                 VALUES ('{FILE}', '{VERSION}', 'text/plain', 0, X'{HASH32}', \
+                 'whole-sha256', 3, 'available', 0, 'local', '/x')"
+            ),
+        ))
+        .await;
+    assert!(
+        res.is_err(),
+        "whole-sha256 with a non-NULL part_count must violate the presence CHECK"
+    );
+}
+
+/// The `hash_mode` CHECK rejects any value outside the two shipped modes.
+#[tokio::test]
+async fn content_hash_modes_rejects_unknown_hash_mode() {
+    let db = migrated_db().await;
+    insert_file(&db, FILE).await;
+    let res = db
+        .execute(stmt(
+            &db,
+            format!(
+                "INSERT INTO file_versions \
+                 (file_id, version_id, mime_type, size, hash_value, hash_mode, \
+                  status, is_current, backend_id, backend_path) \
+                 VALUES ('{FILE}', '{VERSION}', 'text/plain', 0, X'{HASH32}', \
+                 'blake3-tree', 'available', 0, 'local', '/x')"
+            ),
+        ))
+        .await;
+    assert!(
+        res.is_err(),
+        "an unknown hash_mode must be rejected by the CHECK"
+    );
+}
+
+/// The `hash_algorithm = 'SHA-256'` CHECK is left untouched by ADR-0006 — a
+/// second algorithm is still rejected (AC5, schema half).
+#[tokio::test]
+async fn content_hash_modes_leaves_hash_algorithm_check_intact() {
+    let db = migrated_db().await;
+    insert_file(&db, FILE).await;
+    let res = db
+        .execute(stmt(
+            &db,
+            format!(
+                "INSERT INTO file_versions \
+                 (file_id, version_id, mime_type, size, hash_algorithm, hash_value, \
+                  status, is_current, backend_id, backend_path) \
+                 VALUES ('{FILE}', '{VERSION}', 'text/plain', 0, 'BLAKE3', X'{HASH32}', \
+                 'available', 0, 'local', '/x')"
+            ),
+        ))
+        .await;
+    assert!(
+        res.is_err(),
+        "hash_algorithm CHECK must still reject any non-SHA-256 value"
     );
 }

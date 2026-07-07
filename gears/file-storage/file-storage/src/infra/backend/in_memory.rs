@@ -14,8 +14,11 @@ use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::infra::content::hash;
+use crate::infra::content::hash_mode::Manifest;
 
-use super::{BackendCapabilities, StorageBackend};
+use super::{
+    BackendCapabilities, MultipartCompletionPart, StorageBackend, build_manifest_and_root,
+};
 
 /// In-progress multipart state per handle: (blob path, ordered parts).
 type MultipartMap = HashMap<String, (String, BTreeMap<u32, Bytes>)>;
@@ -140,6 +143,7 @@ impl StorageBackend for InMemoryBackend {
         _path: &str,
         upload_handle: &str,
         part_number: u32,
+        _part_offset: u64,
         data: Bytes,
     ) -> Result<(String, Vec<u8>), DomainError> {
         // @cpt-begin:cpt-cf-file-storage-flow-multipart-upload-part:p1:inst-part-hash
@@ -162,8 +166,8 @@ impl StorageBackend for InMemoryBackend {
         &self,
         _path: &str,
         upload_handle: &str,
-        _parts: &[(u32, String)],
-    ) -> Result<Vec<u8>, DomainError> {
+        parts: &[MultipartCompletionPart],
+    ) -> Result<(Manifest, [u8; 32]), DomainError> {
         let (final_path, parts_map) = {
             let mut mp = self.lock_multipart()?;
             mp.remove(upload_handle).ok_or_else(|| {
@@ -173,21 +177,21 @@ impl StorageBackend for InMemoryBackend {
                 )
             })?
         };
-        // Assemble parts in ascending part_number order (BTreeMap iterates sorted).
+        // Assemble parts in ascending part_number order (BTreeMap iterates
+        // sorted) into the blob store so `get` returns the whole object. The
+        // stored **hash** is no longer derived from these assembled bytes —
+        // per ADR-0006 mode 2 it is the offset-manifest root built from the
+        // per-part digests the caller already collected, so completing a
+        // multipart upload never rehashes the assembled object.
         let mut assembled = Vec::new();
         for (_, part_data) in parts_map {
             assembled.extend_from_slice(&part_data);
         }
-        // Hash the assembled object so the caller stores the digest of the bytes
-        // actually persisted (consistent with `get` + integrity recomputes).
-        // @cpt-begin:cpt-cf-file-storage-algo-combine-part-hashes:p1:inst-combine-sha256
-        let digest = hash::sha256(&assembled);
-        // @cpt-end:cpt-cf-file-storage-algo-combine-part-hashes:p1:inst-combine-sha256
         self.lock_blobs()?
             .insert(final_path, Bytes::from(assembled));
-        // @cpt-begin:cpt-cf-file-storage-algo-combine-part-hashes:p1:inst-combine-return
-        Ok(digest)
-        // @cpt-end:cpt-cf-file-storage-algo-combine-part-hashes:p1:inst-combine-return
+
+        // @cpt-cf-file-storage-algo-content-hash-modes-build-manifest
+        build_manifest_and_root(parts)
     }
 
     async fn abort_multipart(&self, _path: &str, upload_handle: &str) -> Result<(), DomainError> {

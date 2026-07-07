@@ -1341,6 +1341,7 @@ async fn complete_one_part_multipart_upload(
             &backend_path,
             &session.backend_upload_handle,
             part.part_number,
+            part.offset,
             Bytes::from_static(data),
         )
         .await
@@ -1609,6 +1610,9 @@ async fn sweep_mid_flight_after_finalize_but_before_session_cas_does_not_delete_
             plan.version_id,
             5,
             vec![0u8; 32],
+            file_storage::infra::content::hash_mode::HashMode::WholeSha256,
+            None,
+            None,
             None,
             finalize_audit,
         )
