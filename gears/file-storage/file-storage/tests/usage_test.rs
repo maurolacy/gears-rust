@@ -199,7 +199,9 @@ fn new_file(owner: Uuid) -> NewFile {
 /// directly via the backend's native multipart API, then persist the part
 /// row via `MultipartStore::upsert_multipart_part` (bypassing the
 /// token-authenticated `report_part` callback, which isn't the focus here).
-/// Returns `(file_id, upload_id, version_id, part_bytes)`.
+/// Returns `(upload_id, version_id, size)`, where `size` is the uploaded
+/// part's declared byte length (`declared_size`, as an `i64`) — `file_id` is
+/// an input, not part of the return value.
 async fn drive_multipart_upload(
     msvc: &MultipartService,
     multipart_store: &Arc<dyn MultipartStore>,

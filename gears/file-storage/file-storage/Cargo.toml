@@ -6,9 +6,19 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "File Storage gear (control plane): metadata, authorization, versioning, signed URLs"
+# `src/bin/` also holds `sidecar_tests.rs`, the sidecar's out-of-line unit-test
+# module (required by the `de1101_tests_in_separate_files` repo lint — see
+# `#[path = "sidecar_tests.rs"] mod tests;` at the bottom of `sidecar.rs`).
+# Cargo's bin-autodiscovery would otherwise treat that file as its own binary
+# crate root; disable it and declare the real binary explicitly instead.
+autobins = false
 
 [lib]
 name = "file_storage"
+
+[[bin]]
+name = "sidecar"
+path = "src/bin/sidecar.rs"
 
 [lints]
 workspace = true

@@ -116,7 +116,7 @@ User-facing interactions that start with an actor (human or external system) and
 
 ### Upload a Part
 
-- [ ] `p1` - **ID**: `cpt-cf-file-storage-flow-multipart-upload-part`
+- [x] `p1` - **ID**: `cpt-cf-file-storage-flow-multipart-upload-part`
 
 **Actor**: `cpt-cf-file-storage-actor-platform-user` (part PUT goes directly to sidecar, not through control plane)
 

@@ -455,7 +455,9 @@ pub async fn complete_multipart(
 ) -> ApiResult<impl IntoResponse> {
     svc.complete_multipart_upload(&ctx, file_id, upload_id)
         .await?;
+    // @cpt-begin:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-return
     Ok(no_content().into_response())
+    // @cpt-end:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-return
 }
 
 /// `DELETE /files/{id}/multipart/{upload_id}` — abort a multipart upload.

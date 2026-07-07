@@ -144,6 +144,7 @@ See [PRD.md](./PRD.md) §1 "Overview" and §1.3 "Goals":
 | `cpt-cf-file-storage-adr-sidecar-data-plane`          | Control/data-plane split: the control plane issues signed URLs; the **sidecar** moves all bytes; backends never addressed directly by clients (supersedes the prior proxy-all monolith design)          |
 | `cpt-cf-file-storage-adr-signed-url-transport`        | The signed-URL credential is a single **opaque PASETO `v4.public` token**, carried in the query (`?fs-token=`) or a header; its format is private to control + sidecar (others treat it as opaque bytes)      |
 | `cpt-cf-file-storage-adr-content-hash-selection`      | P1 ships the full hash-selection API with allow-list locked to `["SHA-256"]`; P2 expands the allow-list to BLAKE3 + XXH3 alongside multipart upload                                                    |
+| `cpt-cf-file-storage-adr-s3-client-selection`         | P2's `S3Backend` (`durable: true`, `multipart_native: true`) is built on `rusty-s3` (+ `quick-xml`), executed over the crate's existing `reqwest` stack — no second HTTP/TLS stack; presigning is unused, since the sidecar is the sole holder of S3 credentials |
 
 ### 1.3 Architecture Layers
 

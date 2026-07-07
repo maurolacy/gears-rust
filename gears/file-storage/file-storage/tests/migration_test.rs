@@ -474,6 +474,174 @@ async fn policies_unique_index_allows_distinct_scopes() {
     assert_eq!(count(&db, "SELECT COUNT(*) AS c FROM policies").await, 3);
 }
 
+/// P2 remediation 2.4 follow-up (CodeRabbit finding on PR #4184): the two
+/// partial unique indexes are created with a plain `CREATE UNIQUE INDEX`,
+/// which fails outright if the table already contains rows that would
+/// violate the new constraint. That is exactly the state the pre-2.4 upsert
+/// race (`DELETE` then independent `INSERT`, no transaction, no unique
+/// constraint) could have left behind, so the migration must dedup existing
+/// duplicate rows before creating either index, or it can never be applied
+/// to a database that hit the race even once.
+///
+/// This test applies every migration up to (but not including)
+/// `m20260706_000003_policies_unique_scope` — i.e. the first five migrations
+/// registered in `Migrator::migrations()` — inserts two duplicate
+/// user-scope `policies` rows directly (bypassing the not-yet-created
+/// unique index), then applies the sixth migration and asserts it succeeds,
+/// dedups down to the most-recently-updated row, and leaves the index
+/// enforcing uniqueness going forward.
+#[tokio::test]
+async fn policies_unique_migration_dedups_preexisting_duplicates() {
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory sqlite");
+
+    // Apply every migration except the last one (policies_unique_scope), so
+    // the `policies` table exists but neither partial unique index does yet.
+    Migrator::up(&db, Some(5))
+        .await
+        .expect("apply migrations up to (not including) policies_unique_scope");
+
+    let owner = "00000000-0000-0000-0000-0000000000b2";
+    let older = "00000000-0000-0000-0000-0000000000e1";
+    let newer = "00000000-0000-0000-0000-0000000000e2";
+
+    // Two duplicate rows for the same (tenant_id, 'user', scope_owner_id)
+    // tuple -- exactly what the pre-2.4 upsert race could produce. `newer`
+    // has a later `updated_at` and must be the row that survives dedup.
+    db.execute(stmt(
+        &db,
+        format!(
+            "INSERT INTO policies (policy_id, tenant_id, scope, scope_owner_id, body, updated_at) \
+             VALUES ('{older}', '{TENANT}', 'user', '{owner}', '{{\"v\":1}}', '2026-01-01T00:00:00Z')"
+        ),
+    ))
+    .await
+    .expect("insert older duplicate user-scope policy");
+    db.execute(stmt(
+        &db,
+        format!(
+            "INSERT INTO policies (policy_id, tenant_id, scope, scope_owner_id, body, updated_at) \
+             VALUES ('{newer}', '{TENANT}', 'user', '{owner}', '{{\"v\":2}}', '2026-06-01T00:00:00Z')"
+        ),
+    ))
+    .await
+    .expect("insert newer duplicate user-scope policy");
+
+    // Also seed a tenant-scope duplicate pair (scope_owner_id IS NULL) to
+    // exercise the second dedup pass / second partial index.
+    let tenant_older = "00000000-0000-0000-0000-0000000000e3";
+    let tenant_newer = "00000000-0000-0000-0000-0000000000e4";
+    db.execute(stmt(
+        &db,
+        format!(
+            "INSERT INTO policies (policy_id, tenant_id, scope, scope_owner_id, body, updated_at) \
+             VALUES ('{tenant_older}', '{TENANT}', 'tenant', NULL, '{{\"v\":1}}', '2026-01-01T00:00:00Z')"
+        ),
+    ))
+    .await
+    .expect("insert older duplicate tenant-scope policy");
+    db.execute(stmt(
+        &db,
+        format!(
+            "INSERT INTO policies (policy_id, tenant_id, scope, scope_owner_id, body, updated_at) \
+             VALUES ('{tenant_newer}', '{TENANT}', 'tenant', NULL, '{{\"v\":2}}', '2026-06-01T00:00:00Z')"
+        ),
+    ))
+    .await
+    .expect("insert newer duplicate tenant-scope policy");
+
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) AS c FROM policies").await,
+        4,
+        "all four duplicate rows must be present before the dedup migration runs"
+    );
+
+    // Apply the remaining migration (policies_unique_scope). This must not
+    // fail even though duplicates exist.
+    Migrator::up(&db, Some(1))
+        .await
+        .expect("policies_unique_scope migration must dedup before creating the unique indexes");
+
+    // Exactly one row per group must survive, and it must be the
+    // most-recently-updated one.
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT COUNT(*) AS c FROM policies WHERE tenant_id = '{TENANT}' AND scope = 'user' AND scope_owner_id = '{owner}'"
+            )
+        )
+        .await,
+        1,
+        "duplicate user-scope rows must be deduped to exactly one"
+    );
+    assert_eq!(
+        count(
+            &db,
+            &format!("SELECT COUNT(*) AS c FROM policies WHERE policy_id = '{newer}'")
+        )
+        .await,
+        1,
+        "the surviving user-scope row must be the most-recently-updated one"
+    );
+    assert_eq!(
+        count(
+            &db,
+            &format!("SELECT COUNT(*) AS c FROM policies WHERE policy_id = '{older}'")
+        )
+        .await,
+        0,
+        "the stale user-scope duplicate must have been deleted"
+    );
+
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT COUNT(*) AS c FROM policies WHERE tenant_id = '{TENANT}' AND scope = 'tenant' AND scope_owner_id IS NULL"
+            )
+        )
+        .await,
+        1,
+        "duplicate tenant-scope rows must be deduped to exactly one"
+    );
+    assert_eq!(
+        count(
+            &db,
+            &format!("SELECT COUNT(*) AS c FROM policies WHERE policy_id = '{tenant_newer}'")
+        )
+        .await,
+        1,
+        "the surviving tenant-scope row must be the most-recently-updated one"
+    );
+    assert_eq!(
+        count(
+            &db,
+            &format!("SELECT COUNT(*) AS c FROM policies WHERE policy_id = '{tenant_older}'")
+        )
+        .await,
+        0,
+        "the stale tenant-scope duplicate must have been deleted"
+    );
+
+    // The partial unique indexes must now be live: a fresh duplicate insert
+    // is rejected.
+    let dup_res = db
+        .execute(stmt(
+            &db,
+            format!(
+                "INSERT INTO policies (policy_id, tenant_id, scope, scope_owner_id, body) \
+                 VALUES ('00000000-0000-0000-0000-0000000000e9', '{TENANT}', 'user', '{owner}', '{{}}')"
+            ),
+        ))
+        .await;
+    assert!(
+        dup_res.is_err(),
+        "policies_user_scope_unique_idx must reject a fresh duplicate after the dedup migration: {dup_res:?}"
+    );
+}
+
 // ── cascade delete (FK enforcement enabled) ──────────────────────────────────
 
 #[tokio::test]

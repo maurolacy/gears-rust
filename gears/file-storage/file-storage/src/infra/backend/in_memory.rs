@@ -129,7 +129,9 @@ impl StorageBackend for InMemoryBackend {
         part_number: u32,
         data: Bytes,
     ) -> Result<(String, Vec<u8>), DomainError> {
+        // @cpt-begin:cpt-cf-file-storage-flow-multipart-upload-part:p1:inst-part-hash
         let hash_bytes = hash::sha256(&data);
+        // @cpt-end:cpt-cf-file-storage-flow-multipart-upload-part:p1:inst-part-hash
         let etag = hex::encode(&hash_bytes);
 
         let mut mp = self.lock_multipart()?;
@@ -165,10 +167,14 @@ impl StorageBackend for InMemoryBackend {
         }
         // Hash the assembled object so the caller stores the digest of the bytes
         // actually persisted (consistent with `get` + integrity recomputes).
+        // @cpt-begin:cpt-cf-file-storage-algo-combine-part-hashes:p1:inst-combine-sha256
         let digest = hash::sha256(&assembled);
+        // @cpt-end:cpt-cf-file-storage-algo-combine-part-hashes:p1:inst-combine-sha256
         self.lock_blobs()?
             .insert(final_path, Bytes::from(assembled));
+        // @cpt-begin:cpt-cf-file-storage-algo-combine-part-hashes:p1:inst-combine-return
         Ok(digest)
+        // @cpt-end:cpt-cf-file-storage-algo-combine-part-hashes:p1:inst-combine-return
     }
 
     async fn abort_multipart(&self, _path: &str, upload_handle: &str) -> Result<(), DomainError> {

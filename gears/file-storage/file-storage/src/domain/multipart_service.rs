@@ -543,6 +543,7 @@ impl MultipartService {
             ));
         }
 
+        // @cpt-begin:cpt-cf-file-storage-flow-multipart-upload-part:p1:inst-part-db-upsert
         self.store
             .upsert_multipart_part(
                 upload_id,
@@ -553,12 +554,14 @@ impl MultipartService {
                 OffsetDateTime::now_utc(),
             )
             .await
+        // @cpt-end:cpt-cf-file-storage-flow-multipart-upload-part:p1:inst-part-db-upsert
     }
 
     /// `POST /files/{id}/multipart/{upload_id}/complete`: finalize all parts.
     ///
     /// @cpt-cf-file-storage-fr-multipart-upload
     /// @cpt-cf-file-storage-fr-audit-trail
+    /// @cpt-dod:cpt-cf-file-storage-dod-multipart-complete:p1
     #[tracing::instrument(skip_all)]
     pub async fn complete_multipart_upload(
         &self,
@@ -566,13 +569,16 @@ impl MultipartService {
         file_id: Uuid,
         upload_id: Uuid,
     ) -> Result<(), DomainError> {
+        // @cpt-begin:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-request
         let prefetch = Self::tenant_scope(ctx);
         let file = self.store.require_file(&prefetch, file_id).await?;
         let _scope = self
             .authorizer
             .authorize(ctx, actions::WRITE, &file.gts_file_type, Some(file_id))
             .await?;
+        // @cpt-end:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-request
 
+        // @cpt-begin:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-load-session
         let session = self
             .store
             .get_multipart_upload(upload_id)
@@ -605,8 +611,11 @@ impl MultipartService {
                 upload_id, "expired",
             ));
         }
+        // @cpt-end:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-load-session
 
+        // @cpt-begin:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-load-parts
         let parts = self.store.list_multipart_parts(upload_id).await?;
+        // @cpt-end:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-load-parts
 
         // Fetch the backend from the version row.
         let version = self.store.get_version(file_id, session.version_id).await?;
@@ -617,6 +626,7 @@ impl MultipartService {
         let backend = self.backends.get(&backend_id)?;
         let backend_path = Self::backend_path(file_id, session.version_id);
 
+        // @cpt-begin:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-size-verify
         // Compute total assembled size from the parts that the sidecar wrote.
         let total_size: i64 = parts.iter().map(|p| p.size).sum();
 
@@ -635,7 +645,9 @@ impl MultipartService {
                 )));
             }
         }
+        // @cpt-end:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-size-verify
 
+        // @cpt-begin:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-policy-check
         // Policy size check.
         let policy = self
             .get_effective_policy_internal(ctx.subject_tenant_id(), file.owner_id)
@@ -654,7 +666,9 @@ impl MultipartService {
                 "policy size limit",
             ));
         }
+        // @cpt-end:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-policy-check
 
+        // @cpt-begin:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-assemble
         // Build the parts list for the backend.
         let backend_parts: Vec<(u32, String)> = parts
             .iter()
@@ -672,7 +686,9 @@ impl MultipartService {
                 &backend_parts,
             )
             .await?;
+        // @cpt-end:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-assemble
 
+        // @cpt-begin:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-finalize-version
         // Finalize the version row (no separate audit row — complete below covers it).
         let finalize_audit = Self::audit_ok(
             ctx,
@@ -699,7 +715,9 @@ impl MultipartService {
                 "multipart upload {upload_id}: version row was removed before completion"
             )));
         }
+        // @cpt-end:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-finalize-version
 
+        // @cpt-begin:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-db-session
         // Mark the session completed and emit the main audit row.
         // @cpt-cf-file-storage-fr-audit-trail
         let audit = Self::audit_ok(
@@ -721,6 +739,7 @@ impl MultipartService {
                 session.state.as_str(),
             ));
         }
+        // @cpt-end:cpt-cf-file-storage-flow-multipart-complete:p1:inst-complete-db-session
 
         // @cpt-cf-file-storage-fr-usage-reporting
         // Credit the assembled object's total bytes. Multipart finalize does
