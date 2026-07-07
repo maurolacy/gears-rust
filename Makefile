@@ -138,6 +138,7 @@ setup: .setup-stamp
 	cargo install lychee
 	cargo install cargo-geiger
 	cargo install cargo-deny
+	cargo install cargo-gears
 	cargo install cargo-fuzz
 	cargo install cargo-hack
 	cargo install gts-validator
@@ -158,15 +159,6 @@ setup: .setup-stamp
 	fi
 	@echo "Setup complete. All tools installed."
 	@touch .setup-stamp
-
-# -------- Code formatting --------
-
-.PHONY: fmt
-
-# Check code formatting
-fmt:
-	$(call check_rustup_component,rustfmt)
-	cargo fmt --all --check
 
 # -------- Gear naming validation --------
 
@@ -298,13 +290,18 @@ gts-docs:
 install-tools:
 	@command -v cargo-nextest >/dev/null 2>&1 || cargo install --locked cargo-nextest
 
+# Run architecture lints via cargo-gears (see Gears.toml for configuration).
+dylint:
+	$(call check_tool,cargo-gears)
+	cargo gears lint --dylint
+
 # Check for unused dependencies with cargo-shear.
 shear:
 	$(call check_tool,cargo-shear)
 	cargo +nightly-2026-04-16 shear --expand --deny-warnings
 
 # Run all code safety checks
-safety: clippy kani lint # geiger
+safety: clippy kani lint dylint # geiger
 	@echo "OK. Rust Safety Pipeline complete"
 
 ## Validate gear folder names follow kebab-case convention
@@ -807,14 +804,14 @@ oop-example:
 	cargo run --bin cf-gears-example-server --features oop-example,users-info-example,static-authn,static-authz,static-tenants,static-credstore -- --config config/quickstart.yaml run
 
 # Run all quality checks
-check: .setup-stamp fmt cfs-validate clippy lychee security gts-docs test
+check: .setup-stamp fmt cfs-validate clippy lychee security dylint gts-docs test
 
 ci_test: fmt clippy
 
 ci_docs: lychee gts-docs
 
 # Run CI pipeline locally, requires docker
-ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg lychee gts-docs
+ci: fmt clippy test-no-macros test-macros test-db deny test-users-info-pg lychee gts-docs dylint
 
 ## Build the cf-gears-example-server release binary using a toolchain from the rust-toolchain.toml
 .cargo-build:
