@@ -323,7 +323,8 @@ impl Store {
     /// parent file was already checked.
     ///
     /// Returns `true` on a successful swap, `false` on a concurrent CAS
-    /// conflict (caller maps to 412 PreconditionFailed).
+    /// conflict (caller maps to PreconditionFailed; REST maps that canonical
+    /// error to HTTP 400).
     ///
     /// @cpt-cf-file-storage-fr-audit-trail
     /// @cpt-cf-file-storage-nfr-audit-completeness

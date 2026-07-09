@@ -28,7 +28,8 @@ pub enum DomainError {
     #[error("Conflict: {message}")]
     Conflict { message: String },
 
-    /// 412 — a conditional-request precondition (`If-Match`/CAS) failed.
+    /// A conditional-request precondition (`If-Match`/CAS) failed.
+    /// The REST layer maps this canonical error to HTTP 400.
     #[error("Precondition failed: {message}")]
     PreconditionFailed { message: String },
 

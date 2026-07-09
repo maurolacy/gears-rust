@@ -58,9 +58,9 @@ pub struct SweepResult {
 
 /// The cleanup engine -- orchestrates the background sweep.
 ///
-/// Call `run_sweep()` to execute one full cycle. The gear wires a repeating
-/// `tokio::time::sleep` loop that calls this when `enable_background_sweep` is
-/// `true`.
+/// Call `run_sweep()` to execute one full cycle. The gear lifecycle wires a
+/// cancellable repeating sleep loop that calls this when
+/// `enable_background_sweep` is `true`.
 ///
 /// **P2 scope**: orphan reconciliation + retention-policy expiry.
 /// Backend blob-without-row reconciliation (cross-backend orphan enumeration via
@@ -245,6 +245,23 @@ impl CleanupEngine {
         // @cpt-end:cpt-cf-file-storage-algo-sweep-abandoned-pending:p1:inst-sweep-pending-return
     }
 
+    /// Best-effort load of a file row for audit tenant attribution. A failed
+    /// lookup is logged and treated as absent, so the caller falls back to a
+    /// nil tenant rather than blocking reclamation.
+    async fn load_file_for_audit(&self, file_id: Uuid) -> Option<file_storage_sdk::File> {
+        match self.store.get_file(file_id).await {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::warn!(
+                    error = ?e,
+                    file_id = %file_id,
+                    "cleanup: failed to load file for audit tenant attribution"
+                );
+                None
+            }
+        }
+    }
+
     /// Delete one abandoned pending version row, clean up its backend blob,
     /// and -- if that leaves the parent file with no versions and a `NULL`
     /// `content_id` -- delete the now-permanently-orphaned `files` row too
@@ -267,9 +284,10 @@ impl CleanupEngine {
         backend_id: &str,
         backend_path: &str,
     ) -> (usize, usize) {
+        let file = self.load_file_for_audit(file_id).await;
         // @cpt-begin:cpt-cf-file-storage-algo-sweep-abandoned-pending:p1:inst-sweep-pending-audit-delete
         let audit = AuditEntry {
-            tenant_id: Uuid::nil(),
+            tenant_id: file.as_ref().map_or_else(Uuid::nil, |file| file.tenant_id),
             actor_kind: "system".to_owned(),
             actor_id: Uuid::nil(),
             file_id: Some(file_id),
@@ -292,7 +310,7 @@ impl CleanupEngine {
                 // separately by `maybe_delete_orphaned_file` below).
                 // Best-effort: a failed file lookup just skips the (usually
                 // zero-magnitude) report rather than blocking reclamation.
-                if let Ok(Some(file)) = self.store.get_file(file_id).await {
+                if let Some(file) = file.as_ref() {
                     self.report_usage(UsageDelta {
                         tenant_id: file.tenant_id,
                         owner_id: file.owner_id,
@@ -352,6 +370,7 @@ impl CleanupEngine {
 
         let audit = orphan_reconcile_audit(
             file_id,
+            file.tenant_id,
             serde_json::json!({
                 "reason": "abandoned_pending_version_orphan_file",
             }),
@@ -523,8 +542,15 @@ impl CleanupEngine {
     /// @cpt-cf-file-storage-fr-orphan-reconciliation
     /// @cpt-state:cpt-cf-file-storage-state-retention-cleanup-multipart-touch:p1
     async fn abort_expired_multipart_session(&self, session: MultipartUploadSession) -> usize {
+        let audit_tenant_id = self
+            .store
+            .get_file(session.file_id)
+            .await
+            .ok()
+            .flatten()
+            .map_or_else(Uuid::nil, |file| file.tenant_id);
         let abort_audit = AuditEntry {
-            tenant_id: Uuid::nil(),
+            tenant_id: audit_tenant_id,
             actor_kind: "system".to_owned(),
             actor_id: Uuid::nil(),
             file_id: Some(session.file_id),
@@ -606,6 +632,12 @@ impl CleanupEngine {
         // is left untouched -- the DELETE simply matches zero rows.
         let del_audit = orphan_reconcile_audit(
             session.file_id,
+            self.store
+                .get_file(session.file_id)
+                .await
+                .ok()
+                .flatten()
+                .map_or_else(Uuid::nil, |file| file.tenant_id),
             serde_json::json!({
                 "reason": "expired_multipart_version_cleanup",
                 "upload_id": session.upload_id,
@@ -898,9 +930,9 @@ impl CleanupEngine {
 // ── free helpers ──────────────────────────────────────────────────────────────
 
 /// Build a system-actor `OrphanReconcile` audit entry.
-fn orphan_reconcile_audit(file_id: Uuid, detail: serde_json::Value) -> AuditEntry {
+fn orphan_reconcile_audit(file_id: Uuid, tenant_id: Uuid, detail: serde_json::Value) -> AuditEntry {
     AuditEntry {
-        tenant_id: Uuid::nil(),
+        tenant_id,
         actor_kind: "system".to_owned(),
         actor_id: Uuid::nil(),
         file_id: Some(file_id),

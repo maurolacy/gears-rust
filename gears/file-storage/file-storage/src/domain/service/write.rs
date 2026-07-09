@@ -267,7 +267,8 @@ impl FileService {
 
     /// `POST /files/{id}/bind`: swap the content pointer to `version_id` under
     /// optimistic CAS guarded by the `If-Match` content ETag. Returns the
-    /// updated file; `412` on conflict (re-read the ETag and rebind).
+    /// updated file; `PreconditionFailed` on conflict (re-read the ETag and
+    /// rebind). The REST layer maps that canonical error to HTTP 400.
     ///
     /// `if_match` is the opaque content ETag (or `*`, or `None` for the first
     /// bind). The server recomputes the current ETag and compares — it never

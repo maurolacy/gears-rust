@@ -203,7 +203,7 @@ async fn bind_with_wrong_if_match_returns_precondition_failed() {
         .await
         .unwrap();
 
-    // New version, then bind with a bogus If-Match → 412.
+    // New version, then bind with a bogus If-Match.
     let t2 = svc.presign_version(&ctx, t1.file_id).await.unwrap();
     dp.put_content(
         &ctx,
@@ -412,7 +412,7 @@ async fn delete_file_if_match_required_and_enforced() {
     let file = svc.get_file(&ctx, ticket.file_id).await.unwrap();
     let current_etag = etag::etag_for(&file).expect("file must have an ETag after bind");
 
-    // No If-Match → 412 (required).
+    // No If-Match: precondition required.
     let err = svc
         .delete_file(&ctx, ticket.file_id, None)
         .await
@@ -422,7 +422,7 @@ async fn delete_file_if_match_required_and_enforced() {
         "expected PreconditionFailed when If-Match absent, got {err:?}"
     );
 
-    // Wrong ETag → 412.
+    // Wrong ETag: precondition failed.
     let err = svc
         .delete_file(&ctx, ticket.file_id, Some("\"wrong-etag\""))
         .await

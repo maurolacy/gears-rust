@@ -265,7 +265,8 @@ metadata-only update protects against concurrent **content** writes but cannot d
 
 Rather than leave metadata writes silently last-write-wins, P1 exposes the metadata revision as its own conditional
 validator: the `meta_version` is already on the wire as `X-FS-Metadata-Revision: <u64>`, and a metadata-only update
-MAY carry **`If-Match-Metadata: <u64>`**, matched against the current `meta_version` (mismatch → `412`). The header is
+MAY carry **`If-Match-Metadata: <u64>`**, matched against the current `meta_version` (mismatch →
+`400 failed_precondition`). The header is
 optional: absent, the write falls back to last-write-wins for back-compatibility; clients that store real state in
 custom metadata (billing tags, classification, policy labels) opt in to lost-update protection. This keeps the wire
 contract locked in P1 without composing it into ETag (which would defeat CDN caching on metadata-only changes).
@@ -419,8 +420,8 @@ the sidecar.
 
 - Register the auth-required router `/api/file-storage/v1/*` with the platform `security_context_layer`; **all
   endpoints are JSON** via OperationBuilder (metadata CRUD, listing, `GET /storages`, presign, bind)
-- Parse and validate conditional headers and enforce conditional-request semantics (return `304`, `412` as defined in
-  `cpt-cf-file-storage-fr-conditional-requests`), including the optional `If-Match-Metadata` precondition on
+- Parse and validate conditional headers and enforce conditional-request semantics (return `304` for cache validation
+  and `400 failed_precondition` for failed preconditions, per the platform canonical-error mapping), including the optional `If-Match-Metadata` precondition on
   metadata-only updates (matched against `meta_version`)
 - Dispatch presign requests to `signed-url-issuer` (upload / download / multipart-part) and bind/rebind requests to
   `bind-service`; metadata reads/writes to `metadata-service`
@@ -522,7 +523,7 @@ present) the platform token, then drives the byte path. The only component clien
 
 - Verify the **PASETO `v4.public`** token (Ed25519) with the control-distributed public key; check `exp`, `ip`, and token-claim predicates
   (validating a real platform JWT when a predicate references a claim); reject with `403` on any failure
-- Parse the `Range` header (to `ByteRange`) and conditional headers; serve `200`/`206`/`304`/`412`/`416` for downloads
+- Parse the `Range` header (to `ByteRange`) and conditional headers; serve `200`/`206`/`304`/`416` for downloads
 - On upload: stream the body through `stream-proxy` to the backend first (the version was already pre-registered by
   the control plane at presign time — the sidecar does **not** pre-register); once bytes have landed, call the
   control plane's token-authenticated **finalize** callback (same `fs-token`, no app-token, no on-behalf-of
@@ -742,7 +743,7 @@ control-plane service never streams bytes for it.
 - For content: call control `metadata-service`/`signed-url-issuer` directly (in-process, no HTTP), obtain a signed URL,
   then transfer to/from the sidecar over HTTP from the consumer's process. `open_read` presigns once (URL pins
   `content_id`) and issues many `Range` GETs to the sidecar, re-presigning on `exp`
-- For write: presign → `PUT` to the sidecar → bind; surface a bind `412` so the caller can retry without re-upload
+- For write: presign → `PUT` to the sidecar → bind; surface a bind `400 failed_precondition` so the caller can retry without re-upload
 - Carry `SecurityContext` from the calling gear's request context; authorization runs through the same `authz-adapter`
 
 ##### Responsibility boundaries
@@ -805,7 +806,7 @@ architecture the server owns the plan.)
   is therefore transfer-time, not deferred to `complete`
 - Each part's hash is persisted by the sidecar (via SDK) in `multipart_upload_parts.part_hash` in the shared DB —
   durable so an upload is resumable and survives a sidecar crash
-- `complete` binds the new version exactly like single-shot (CAS on `content_id`, `412` → rebind)
+- `complete` binds the new version exactly like single-shot (CAS on `content_id`, `400 failed_precondition` → rebind)
 
 `part_hash` is a SHA-256 of each part's bytes (`hash::sha256(&data)`). Per
 [ADR-0006](./ADR/0006-cpt-cf-file-storage-adr-content-hash-modes.md) (implemented), `complete_multipart` no longer
@@ -851,7 +852,7 @@ schema, status codes — is documented in **[api.md](./api.md)**. The summary:
 - **Conditional headers**: `If-Match` required on **bind** and `DELETE`; `If-Match`/`If-None-Match` optional on reads
   (sidecar for downloads, control for metadata). ETag is `(file_id, content_id)`-derived and content-only.
   `If-Match-Metadata: <u64>` is an optional metadata-concurrency validator on metadata-only updates, matched against
-  `meta_version` (mismatch → `412`); absent → last-write-wins (see `cpt-cf-file-storage-principle-content-only-etag`)
+  `meta_version` (mismatch → `400 failed_precondition`); absent → last-write-wins (see `cpt-cf-file-storage-principle-content-only-etag`)
 - **Range** (sidecar): full `bytes=` syntax; `Accept-Ranges: bytes` on every download response; `HEAD` ignores `Range`.
   One signed URL serves many ranges (random access). See §4.1
 - **Signed URLs**: an opaque **PASETO `v4.public`** token (Ed25519) carrying AND-combined claims + baked response headers, in the query (`?fs-token=`) or a header — see §4.5
@@ -1046,9 +1047,9 @@ sequenceDiagram
     CTL->>MS: read(file_id)
     MS-->>CTL: current File row (incl. content_id, meta_version)
     alt If-Match (ETag) mismatch
-        CTL-->>C: 412 Precondition Failed
+        CTL-->>C: 400 failed_precondition
     else If-Match-Metadata present and != current meta_version
-        CTL-->>C: 412 Precondition Failed
+        CTL-->>C: 400 failed_precondition
     else
         CTL->>AZ: check(action=write, resource=gts~<type>~)
         AZ-->>CTL: Allow
@@ -1085,7 +1086,7 @@ sequenceDiagram
     else found
         MS-->>CTL: current File row (content_id) + all version rows
         alt ETag mismatch
-            CTL-->>C: 412 Precondition Failed
+            CTL-->>C: 400 failed_precondition
         else
             CTL->>AZ: check(action=delete, resource=gts~<type>~)
             AZ-->>CTL: Allow
@@ -1381,7 +1382,7 @@ not require this and several caches behave incorrectly if `HEAD` returns range-s
 clarity.
 
 **Conditional + Range interaction.** `If-None-Match` applies before range. If the ETag matches, the response is `304`
-regardless of `Range`. `If-Match` mismatch returns `412` regardless of `Range`. If both checks pass, range is applied
+regardless of `Range`. `If-Match` mismatch returns `400 failed_precondition` regardless of `Range`. If both checks pass, range is applied
 and the response is `200`/`206`/`416`. This matches RFC 7232 §6.
 
 **Caching contract.** `206` responses are cacheable per RFC 7234 if they include `Content-Range` and a strong validator

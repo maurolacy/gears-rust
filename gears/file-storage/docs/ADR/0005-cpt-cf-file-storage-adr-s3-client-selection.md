@@ -156,6 +156,13 @@ dependency**. The team has selected `rusty-s3` as the S3 client pending that rev
 and the team's decision, but does not itself constitute the review. That is why this ADR's status is `proposed`, not
 `accepted`.
 
+**Current implementation status (2026-07-08).** The branch contains working S3 backend code and runtime dependency
+wiring so integration tests and operator config can exercise the selected design. This does **not** close the gate
+above: before merging to `main` or enabling S3 in a release path, attach the team security-review artifact for
+`rusty-s3` and `quick-xml` (including XML parsing/DoS considerations and CVE ownership) and then update this ADR's
+status to `accepted`. If that review is not complete, S3 must remain out of the merge/release path or be feature-gated
+off.
+
 ### Consequences
 
 * Two new runtime dependencies, `rusty-s3` and `quick-xml` (pinned `>= 0.41.0`), are added to `file-storage`'s

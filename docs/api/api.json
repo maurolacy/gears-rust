@@ -5362,7 +5362,7 @@
         "type": "array"
       },
       "VersionDto": {
-        "description": "One content version (`GET /files/{id}/versions`).",
+        "description": "One content version (`GET /files/{id}/versions`).\n\nWire shape documented in `docs/api.md` (`hash_mode`/`part_count`/`manifest`\nfields, ADR-0006).\n\n@cpt-dod:cpt-cf-file-storage-dod-content-hash-modes-docs:p2",
         "properties": {
           "created_at": {
             "format": "date-time",

@@ -91,8 +91,9 @@ Built on top of P1, the following shipped:
   [docs/features/backend-migration.md](docs/features/backend-migration.md).
 - **Multipart upload** — server-authoritative parts plan, per-part signed URLs, and the sidecar's report-part
   callback are wired end-to-end. **Functional only against a `multipart_native` backend** (today: the non-durable
-  in-memory backend, dev/test only) — the default `local-fs` backend does not declare `multipart_native`, so
-  `POST /files/{id}/multipart` is rejected against the real default topology. See
+  in-memory backend for dev/test, and configured S3 backends) — the default `local-fs` backend does not declare
+  `multipart_native`, so `POST /files/{id}/multipart` is rejected against the real default topology. S3 remains
+  opt-in and merge/release-gated by the ADR-0005 external-dependency security review. See
   [docs/features/multipart-coordinator.md](docs/features/multipart-coordinator.md) for the tracked gap and current
   vs. intended `complete` contract.
 - **Storage quota — consumer scaffolding only, not enforced.** `check_quota`/`check_quota_bytes` gate every
@@ -106,9 +107,10 @@ Built on top of P1, the following shipped:
   Contrast with usage reporting, which is further along — a `usage-collector-sdk` crate exists (P2 1.12), even
   though `usage_reporter` is also still wired as `None` pending its own integration work.
 
-**Not yet implemented**: sharing (shareable links), WebDAV, quota enforcement wiring (Tier 1 item 1.4, see the P2
-storage-quota status above), and the S3 backend (Tier 1 item 1.7) — all still declared in the PRD/DESIGN but absent
-from the code as of this branch.
+**Not yet implemented**: sharing (shareable links), WebDAV, and quota enforcement wiring (Tier 1 item 1.4, see the P2
+storage-quota status above). The S3 backend (Tier 1 item 1.7) is implemented and wired as an opt-in backend for the
+control plane and sidecar, but it remains gated by the ADR-0005 external-dependency security review before merge or
+release use.
 
 ### Run
 

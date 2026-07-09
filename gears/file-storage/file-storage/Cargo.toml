@@ -37,6 +37,7 @@ cf-gears-authz-resolver-sdk = { path = "../../system/authz-resolver/authz-resolv
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
 

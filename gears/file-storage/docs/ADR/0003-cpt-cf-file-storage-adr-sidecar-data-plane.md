@@ -198,7 +198,7 @@ Implementation verified via:
 * Code review confirming the control plane is the sole signer (holds the Ed25519 private key) and
   the sidecar only verifies (holds the public key).
 * Integration tests covering presign → transfer for upload and download, the bind/rebind CAS path
-  (including the `412` retry that does not re-upload bytes), and signed-URL constraint enforcement
+  (including the failed-precondition retry that does not re-upload bytes), and signed-URL constraint enforcement
   (expiry, ip, token-claim predicates).
 * Usage reports include per-byte ingress/egress counters emitted by the sidecar.
 
