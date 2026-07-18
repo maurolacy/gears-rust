@@ -750,14 +750,18 @@ components:
         `SMALLINT` ordinal at the repo boundary. Examples:
         `status eq 'active'`, `status eq 'pending'`,
         `target_mode eq 'self_managed'`, `initiator_side eq 'child'`.
-        Only `eq`, `ne`, and `in` are admissible on these columns;
-        ordered comparisons (`gt`/`ge`/`lt`/`le`) and `$orderby` are
-        rejected with `400 INVALID_FILTER` because there is no
-        consistent ordering across the wire (alphabetical) and
-        storage (numeric) shapes. Response bodies
-        return the same field as a string (`"pending"`, `"active"`,
-        etc.) for human readability — the filter is the one place
-        the wire surface diverges from the response shape.
+        Only `eq`, `ne`, and `in` are admissible in `$filter` on these
+        columns; ordered comparisons (`gt`/`ge`/`lt`/`le`) are rejected
+        with `400 INVALID_FILTER` because the wire strings carry no
+        meaningful order. `$orderby` on the `conversion_requests`
+        enum columns is likewise rejected. `$orderby=status` on the
+        tenant children listing IS supported and sorts by the
+        lifecycle ordinal (`active` < `suspended` < `deleted`), not
+        alphabetically — operator UIs sort their Status column with
+        it. Filters and response bodies use the same public string
+        values (`"pending"`, `"active"`, etc.); the divergence is
+        between the wire contract (strings) and the `SMALLINT` storage
+        ordinal, not between the filter and the response shape.
       schema:
         type: string
     ODataOrderBy:
@@ -887,10 +891,16 @@ components:
           type: integer
           minimum: 0
           description: |
-            Number of direct children visible to the caller, resolved at
-            read time. Scope-filtered (direct children behind a
-            self-managed barrier the caller cannot penetrate are not
-            counted); excludes AM-internal `provisioning` rows; includes
+            Number of direct children of this tenant, resolved at read
+            time. Gated on the PARENT: when this tenant is reachable
+            under the caller's barrier-respecting scope, ALL of its
+            direct children are counted — including `self_managed` ones,
+            mirroring the direct-child carve-out of the `/children`
+            listing (the counter and the listing always agree). For a
+            tenant the caller can see only through that identity-level
+            carve-out (i.e. a `self_managed` tenant past its own
+            barrier), the count is `0` — nothing below a barrier leaks.
+            Excludes AM-internal `provisioning` rows; includes
             soft-`deleted` children. `0` for a leaf. Derived field — not
             available in `$filter` / `$orderby`.
         created_at:

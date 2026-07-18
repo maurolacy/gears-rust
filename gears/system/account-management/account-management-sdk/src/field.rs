@@ -45,6 +45,12 @@ pub const ROOT_TENANT_CANNOT_CHANGE_STATUS: &str = "ROOT_TENANT_CANNOT_CHANGE_ST
 /// `provisioning_metadata.realm_name`) — see [`PROVISIONING_METADATA_FIELD`].
 pub const IDP_INVALID_INPUT: &str = "IDP_INVALID_INPUT";
 
+/// The `IdP` rejected the supplied password against its configured
+/// password policy. Carried on the [`PASSWORD_FIELD`]
+/// field-violation so clients can attribute the failure to the
+/// password input; the raw policy text stays provider-side.
+pub const PASSWORD_POLICY: &str = "PASSWORD_POLICY";
+
 // ---------------------------------------------------------------------------
 // `field_violations[].field` attribution keys.
 //
@@ -68,6 +74,10 @@ pub const METADATA_FIELD: &str = "metadata";
 /// ([`ROOT_TENANT_CANNOT_DELETE`] / [`ROOT_TENANT_CANNOT_CONVERT`] /
 /// [`ROOT_TENANT_CANNOT_CHANGE_STATUS`]).
 pub const TENANT_ID_FIELD: &str = "tenant_id";
+
+/// `password` field for `IdP` password-policy rejects (carries
+/// [`PASSWORD_POLICY`]).
+pub const PASSWORD_FIELD: &str = "password";
 
 /// Shared fallback field for [`IDP_INVALID_INPUT`] when the `IdP`
 /// plugin cannot localise the violation to a specific sub-key — the
@@ -100,6 +110,8 @@ pub enum ValidationReason {
     RootTenantCannotChangeStatus,
     /// See [`IDP_INVALID_INPUT`].
     IdpInvalidInput,
+    /// See [`PASSWORD_POLICY`].
+    PasswordPolicy,
     /// Unmodeled / future reason — preserves the raw wire string.
     Unknown(String),
 }
@@ -117,6 +129,7 @@ impl ValidationReason {
             ROOT_TENANT_CANNOT_CONVERT => Self::RootTenantCannotConvert,
             ROOT_TENANT_CANNOT_CHANGE_STATUS => Self::RootTenantCannotChangeStatus,
             IDP_INVALID_INPUT => Self::IdpInvalidInput,
+            PASSWORD_POLICY => Self::PasswordPolicy,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -132,6 +145,7 @@ impl ValidationReason {
             Self::RootTenantCannotConvert => ROOT_TENANT_CANNOT_CONVERT,
             Self::RootTenantCannotChangeStatus => ROOT_TENANT_CANNOT_CHANGE_STATUS,
             Self::IdpInvalidInput => IDP_INVALID_INPUT,
+            Self::PasswordPolicy => PASSWORD_POLICY,
             Self::Unknown(s) => s.as_str(),
         }
     }
@@ -165,6 +179,7 @@ mod tests {
                 ValidationReason::RootTenantCannotChangeStatus,
             ),
             (IDP_INVALID_INPUT, ValidationReason::IdpInvalidInput),
+            (PASSWORD_POLICY, ValidationReason::PasswordPolicy),
         ] {
             assert_eq!(ValidationReason::from_wire(wire), expected);
             assert_eq!(expected.as_wire(), wire);
