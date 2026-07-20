@@ -31,6 +31,8 @@ env:
   SCCACHE_CACHE_SIZE: "2G"
   # Usually better determinism and smaller cache churn in CI.
   CARGO_INCREMENTAL: "0"
+  # Pinned nightly toolchain used by coverage, dylint, and shear jobs.
+  RUSTUP_TOOLCHAIN_NIGHTLY: nightly-2026-04-16
 
 jobs:
   # ── Change detection ──────────────────────────────────────────────────
@@ -450,7 +452,7 @@ jobs:
       contents: read
       id-token: write
     env:
-      RUSTUP_TOOLCHAIN: nightly-2026-04-16
+      RUSTUP_TOOLCHAIN: ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -512,7 +514,7 @@ jobs:
     if: needs.changes.outputs.dylint == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
-      RUSTUP_TOOLCHAIN: nightly-2026-04-16
+      RUSTUP_TOOLCHAIN: ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -576,7 +578,7 @@ jobs:
     # Advisory only — unused-dep warnings should not block PRs.
     continue-on-error: true
     env:
-      RUSTUP_TOOLCHAIN: nightly-2026-04-16
+      RUSTUP_TOOLCHAIN: ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
