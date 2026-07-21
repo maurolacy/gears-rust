@@ -483,8 +483,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    env:
-      RUSTUP_TOOLCHAIN: ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -507,15 +505,20 @@ jobs:
       - name: Install Rust toolchain (with llvm-tools)
         uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly
         with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}
           components: llvm-tools-preview
+
+      # Override rust-toolchain.toml (which pins stable) for all cargo
+      # commands in this job.
+      - name: Pin nightly for all cargo commands
+        run: echo "RUSTUP_TOOLCHAIN=${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}" >> "$GITHUB_ENV"
 
       - name: Cache Cargo/target
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           cache-bin: false
           cache-targets: false
-          shared-key: pr-${{ runner.os }}-nightly-${{ env.RUSTUP_TOOLCHAIN }}-llvm-cov
+          shared-key: pr-${{ runner.os }}-nightly-${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}-llvm-cov
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@6ef672efc2b5aabc787a9e94baf4989aa02a97df # v2.70.3
@@ -551,8 +554,6 @@ jobs:
       || needs.changes.outputs.ci == 'true'
       || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    env:
-      RUSTUP_TOOLCHAIN: ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -570,18 +571,23 @@ jobs:
       - name: Install Rust nightly toolchain
         uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly
         with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}
           components: llvm-tools-preview,rustc-dev
 
+      # Override rust-toolchain.toml (which pins stable) for all cargo
+      # commands in this job.
+      - name: Pin nightly for all cargo commands
+        run: echo "RUSTUP_TOOLCHAIN=${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}" >> "$GITHUB_ENV"
+
       - name: Set Rust nightly for Dylint temp builds
-        run: rustup override set ${{ env.RUSTUP_TOOLCHAIN }} --path /tmp
+        run: rustup override set ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }} --path /tmp
 
       - name: Cache Cargo/target
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           cache-bin: false
           cache-targets: false
-          shared-key: pr-${{ runner.os }}-nightly-${{ env.RUSTUP_TOOLCHAIN }}-dylint
+          shared-key: pr-${{ runner.os }}-nightly-${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}-dylint
 
       # NOTE: sccache is intentionally omitted here. Dylint compiles lint
       # crates that link against rustc-dev via dylint-link; wrapping the
@@ -620,8 +626,6 @@ jobs:
     runs-on: ubuntu-latest
     # Advisory only — unused-dep warnings should not block PRs.
     continue-on-error: true
-    env:
-      RUSTUP_TOOLCHAIN: ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -646,15 +650,20 @@ jobs:
       - name: Install Rust nightly toolchain
         uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly
         with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}
           components: llvm-tools-preview,rustc-dev
+
+      # Override rust-toolchain.toml (which pins stable) for all cargo
+      # commands in this job.
+      - name: Pin nightly for all cargo commands
+        run: echo "RUSTUP_TOOLCHAIN=${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}" >> "$GITHUB_ENV"
 
       - name: Cache Cargo/target
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           cache-bin: false
           cache-targets: false
-          shared-key: pr-${{ runner.os }}-nightly-${{ env.RUSTUP_TOOLCHAIN }}-shear
+          shared-key: pr-${{ runner.os }}-nightly-${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}-shear
 
       - name: Install sccache
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
