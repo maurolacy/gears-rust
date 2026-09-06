@@ -11,6 +11,9 @@ rust-version.workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
+[package.metadata.cargo-shear]
+ignored = ["tower"]
+
 [lib]
 name = "toolkit_contract"
 
