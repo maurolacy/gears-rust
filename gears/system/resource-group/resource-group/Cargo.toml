@@ -12,6 +12,9 @@ keywords = ["constructorfabric", "cf-gears", "resource-group"]
 categories = ["web-programming"]
 metadata.docs.rs.all-features = true
 
+[package.metadata.cargo-shear]
+ignored = ["tracing-test"]
+
 [lib]
 name = "resource_group"
 

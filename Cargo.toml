@@ -356,7 +356,6 @@ cf-gears-cluster-conformance = { version = "0.3.2", path = "gears/system/cluster
 
 # System gears SDKs
 account-management-sdk = { package = "cf-gears-account-management-sdk", version = "0.6.2", path = "gears/system/account-management/account-management-sdk" }
-keycloak-idp-plugin = { package = "cf-gears-keycloak-idp-plugin", version = "0.1.1", path = "gears/system/account-management/plugins/keycloak-idp-plugin" }
 cluster-sdk = { package = "cf-gears-cluster-sdk", version = "0.2.2", path = "gears/system/cluster/cluster-sdk" }
 types-registry-sdk = { package = "cf-gears-types-registry-sdk", version = "0.3.6", path = "gears/system/types-registry/types-registry-sdk" }
 tenant-resolver-sdk = { package = "cf-gears-tenant-resolver-sdk", version = "0.3.23", path = "gears/system/tenant-resolver/tenant-resolver-sdk" }
@@ -730,7 +729,6 @@ magika = "1.1"
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "api-24"] }
 
 # Additional testing utilities
-tokio-test = "0.4"
 mockall = "0.13"
 temp-env = { version = "0.3", features = ["async_closure"] }
 wiremock = "0.6"

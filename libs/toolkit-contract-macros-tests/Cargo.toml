@@ -9,6 +9,15 @@ rust-version.workspace = true
 description = "UI tests for toolkit-contract-macros (not published)"
 publish = false
 
+[package.metadata.cargo-shear]
+ignored = [
+    "async-trait",
+    "secrecy",
+    "thiserror",
+    "tokio",
+    "toolkit-contract-macros",
+]
+
 [lints]
 workspace = true
 

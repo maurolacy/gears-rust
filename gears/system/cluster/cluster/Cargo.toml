@@ -68,7 +68,6 @@ tokio-stream = { workspace = true }
 # `PlatformSecurityContext` (§4.6).
 toolkit-transport-grpc = { workspace = true }
 toolkit-security = { workspace = true }
-secrecy = { workspace = true }
 # `bootstrap` is what carries `toolkit::bootstrap::oop::run_oop_with_options` -
 # the whole of `src/main.rs`. The feature is unconditional because the `[[bin]]`
 # is; it pulls the OoP bootstrap's own deps (serde-saphyr, the directory gRPC
@@ -133,6 +132,7 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 # typed `ClusterError` a consumer branches on (DESIGN.md).
 toolkit-canonical-errors = { workspace = true }
 serde-saphyr = { workspace = true }
+secrecy = { workspace = true }
 uuid = { workspace = true }
 tracing-test = { workspace = true }
 parking_lot = { workspace = true }
